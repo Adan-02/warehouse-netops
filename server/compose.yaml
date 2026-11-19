@@ -1,0 +1,49 @@
+name: warehouse-netops
+services:
+  broker:
+    image: eclipse-mosquitto:2.0.22
+    user: "0:0"
+    entrypoint: ["sh", "/etc/warehouse/start.sh"]
+    environment:
+      MQTT_DEVICE_PASSWORD: ${MQTT_DEVICE_PASSWORD:?Run python setup.py first}
+      MQTT_VIEWER_PASSWORD: ${MQTT_VIEWER_PASSWORD:?Run python setup.py first}
+    ports:
+      - "${SERVICE_BIND_IP:-127.0.0.1}:1883:1883"
+    volumes:
+      - ./broker/start.sh:/etc/warehouse/start.sh:ro
+      - ./broker/acl:/etc/warehouse/acl:ro
+      - broker_data:/mosquitto/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", 'mosquitto_sub -h 127.0.0.1 -u warehouse-dashboard -P "$$MQTT_VIEWER_PASSWORD" -t warehouse/cabinet-01/telemetry -V mqttv5 -E -W 3 >/dev/null 2>&1']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+  dashboard:
+    build: .
+    environment:
+      MQTT_HOST: broker
+      MQTT_PORT: "1883"
+      MQTT_USERNAME: warehouse-dashboard
+      MQTT_PASSWORD: ${MQTT_VIEWER_PASSWORD:?Run python setup.py first}
+      SQLITE_PATH: /data/warehouse.sqlite3
+      OFFLINE_AFTER_SECONDS: "20"
+      DEMO_MODE: ${DEMO_MODE:-false}
+    ports:
+      - "${SERVICE_BIND_IP:-127.0.0.1}:8080:8080"
+    volumes:
+      - dashboard_data:/data
+    depends_on:
+      broker:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+volumes:
+  broker_data:
+  dashboard_data:

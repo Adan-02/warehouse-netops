@@ -1,0 +1,15 @@
+[Unit]
+Description=Explicit simulated temperature/humidity from the IoT zone
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=warehouse
+ExecStart=/usr/bin/python3 -u /opt/warehouse-netops/tools/publish_sensor.py --credentials-file /etc/warehouse/device.env --confirm-demo --source-ip 192.168.20.100 --count 0
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

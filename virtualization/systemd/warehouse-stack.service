@@ -1,0 +1,18 @@
+[Unit]
+Description=Warehouse lab MQTT and temperature/humidity dashboard
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=warehouse
+SupplementaryGroups=docker
+WorkingDirectory=/opt/warehouse-netops/server
+ExecStart=/usr/bin/docker compose --project-name warehouse-netops up -d --no-build --pull never --wait --wait-timeout 120
+ExecStop=/usr/bin/docker compose --project-name warehouse-netops stop
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+user cabinet-01
+topic write warehouse/cabinet-01/telemetry
+
+user warehouse-dashboard
+topic read warehouse/cabinet-01/telemetry

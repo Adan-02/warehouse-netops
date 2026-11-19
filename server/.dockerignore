@@ -1,0 +1,8 @@
+.env
+runtime
+tests
+__pycache__
+**/__pycache__
+*.sqlite3*
+*.db
+*.local.json

@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "author": "Warehouse network operations lab",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "wokwi-esp32-devkit-v1",
+      "id": "esp",
+      "top": 12,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-dht22",
+      "id": "environment",
+      "top": 14,
+      "left": 240,
+      "attrs": {"temperature": "24", "humidity": "45"}
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "pullup",
+      "top": -30,
+      "left": 170,
+      "attrs": {"value": "4700"}
+    }
+  ],
+  "connections": [
+    ["esp:TX0", "$serialMonitor:RX", "", []],
+    ["esp:RX0", "$serialMonitor:TX", "", []],
+    ["esp:3V3", "environment:VCC", "red", []],
+    ["esp:GND.1", "environment:GND", "black", []],
+    ["esp:D4", "environment:SDA", "green", []],
+    ["esp:3V3", "pullup:1", "red", []],
+    ["pullup:2", "environment:SDA", "green", []]
+  ],
+  "serialMonitor": {"display": "always", "newline": "lf"},
+  "dependencies": {}
+}

@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>仓库温湿度监测</title>
+  <style>
+    :root { color-scheme:light; --ink:#152822; --muted:#607269; --line:#d8e1db; --green:#17634c; --paper:#f3f6f2; --red:#ab3c2c; --amber:#9a5e12; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--paper); color:var(--ink); font:15px/1.6 Inter,"Microsoft YaHei",system-ui,sans-serif; }
+    header { padding:22px max(24px,calc((100% - 1100px)/2)); background:#173d30; color:#fff; display:flex; align-items:center; justify-content:space-between; gap:16px; }
+    h1 { font-size:23px; line-height:1.3; margin:0; font-weight:650; }
+    header p { margin:4px 0 0; color:#c7ddd0; font-size:13px; }
+    .live { font-size:13px; text-align:right; font-variant-numeric:tabular-nums; }
+    .live span { display:block; color:#c7ddd0; }
+    main { max-width:1148px; margin:28px auto; padding:0 24px; }
+    .demo { border:1px solid #e3b976; background:#fff4db; color:#79500c; padding:10px 14px; margin-bottom:20px; }
+    .error { padding:12px 16px; border-left:3px solid var(--red); background:#fff1ed; color:var(--red); margin-bottom:18px; }
+    .summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); border:1px solid var(--line); background:#fff; }
+    .metric { padding:24px; border-right:1px solid var(--line); }
+    .metric:last-child { border-right:0; }
+    .label { font-size:13px; color:var(--muted); }
+    .value { font-size:36px; line-height:1.5; font-weight:600; font-variant-numeric:tabular-nums; letter-spacing:-1.5px; white-space:nowrap; }
+    .value small { font-size:16px; letter-spacing:0; color:var(--muted); margin-left:5px; }
+    .value .missing { font-size:22px; letter-spacing:0; }
+    .state { font-size:21px; font-weight:600; padding-top:12px; }
+    .state.good { color:var(--green); }
+    .state.bad { color:var(--red); }
+    .state.warn { color:var(--amber); }
+    .detail { font-size:13px; color:var(--muted); margin-top:6px; overflow-wrap:anywhere; }
+    .charts { display:grid; grid-template-columns:1fr 1fr; gap:22px; }
+    section { min-width:0; background:#fff; border:1px solid var(--line); margin-top:22px; padding:22px 24px; }
+    h2 { font-size:16px; margin:0; font-weight:600; }
+    .section-head { display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:16px; }
+    .section-head span { font-size:12px; color:var(--muted); }
+    .plot { height:225px; position:relative; }
+    canvas { width:100%; height:225px; }
+    .empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:14px; }
+    .table-wrap { overflow-x:auto; }
+    table { border-collapse:collapse; width:100%; min-width:460px; font-size:14px; font-variant-numeric:tabular-nums; }
+    th { text-align:left; font-size:12px; color:var(--muted); font-weight:500; }
+    td,th { padding:9px 10px; border-bottom:1px solid #e9eeea; }
+    td:first-child,th:first-child { padding-left:0; }
+    td:last-child,th:last-child { text-align:right; padding-right:0; }
+    tbody tr:last-child td { border:0; }
+    .foot { display:flex; flex-wrap:wrap; justify-content:space-between; color:var(--muted); font-size:12px; padding:15px 0 24px; gap:8px; }
+    .source { font-family:"IBM Plex Mono",monospace; }
+    button { font:inherit; color:var(--green); border:1px solid var(--line); background:#fff; padding:6px 13px; border-radius:4px; cursor:pointer; }
+    button:hover { background:#edf5ef; }
+    button:focus-visible { outline:3px solid #8ac3ab; outline-offset:2px; }
+    [hidden] { display:none!important; }
+    @media(max-width:850px) {
+      .summary { grid-template-columns:1fr 1fr; }
+      .metric:nth-child(2) { border-right:0; }
+      .metric:nth-child(-n+2) { border-bottom:1px solid var(--line); }
+      .charts { grid-template-columns:1fr; gap:0; }
+    }
+    @media(max-width:650px) {
+      header { padding:20px; align-items:flex-start; }
+      h1 { font-size:20px; }
+      .live { font-size:11px; }
+      main { padding:0 16px; margin-top:20px; }
+      .metric { padding:18px; }
+      section { padding:18px 16px; }
+      .section-head { align-items:flex-start; }
+      .section-head span { max-width:140px; text-align:right; }
+      .value { font-size:32px; }
+      .state { font-size:18px; }
+    }
+  </style>
+</head>
+<body>
+<header>
+  <div><h1>仓库温湿度监测</h1><p>机柜环境与采集链路状态</p></div>
+  <div class="live">每 2 秒更新<span id="updated">正在读取状态</span></div>
+</header>
+<main>
+  {% if demo_mode %}<div class="demo">模拟演示模式 · 当前数据由软件发布器生成，实际传感器验收请切换至实物模式。</div>{% endif %}
+  <div class="error" id="http-error" role="alert" hidden>看板接口暂时不可达。正在重试，以下为上次成功读取的数据。</div>
+  <div class="summary">
+    <div class="metric">
+      <div class="label">最近一次机柜温度</div>
+      <div class="value"><span id="temperature">—</span><small>°C</small></div>
+      <div class="detail">设备 <span class="source">{{ device_id }}</span></div>
+    </div>
+    <div class="metric">
+      <div class="label">最近一次相对湿度</div>
+      <div class="value"><span id="humidity" class="missing">未上报</span><small id="humidity-unit" hidden>%RH</small></div>
+      <div class="detail">消息序号 <span id="sequence">—</span></div>
+    </div>
+    <div class="metric"><div class="label">采集状态</div><div class="state warn" id="device-state" aria-live="polite">等待数据</div><div class="detail" id="device-age">等待首条有效上报</div></div>
+    <div class="metric"><div class="label">消息服务</div><div class="state warn" id="broker-state">连接中</div><div class="detail" id="broker-detail">正在确认 MQTT 订阅</div></div>
+  </div>
+  <div class="charts">
+    <section>
+      <div class="section-head"><h2>温度变化</h2><span>最近 120 条有效采样 · °C</span></div>
+      <div class="plot"><canvas id="temperature-chart" aria-label="机柜温度历史曲线" role="img"></canvas><div class="empty" id="temperature-empty">等待有效温度上报</div></div>
+    </section>
+    <section>
+      <div class="section-head"><h2>湿度变化</h2><span>相对湿度 · %RH</span></div>
+      <div class="plot"><canvas id="humidity-chart" aria-label="机柜湿度历史曲线" role="img"></canvas><div class="empty" id="humidity-empty">等待有效湿度上报</div></div>
+    </section>
+  </div>
+  <section>
+    <div class="section-head"><h2>最近上报</h2><button id="refresh" type="button">立即刷新</button></div>
+    <div class="table-wrap"><table><thead><tr><th>接收时间</th><th>消息序号</th><th>温度 °C</th><th>湿度 %RH</th></tr></thead><tbody id="readings"><tr><td colspan="4">等待首条有效上报</td></tr></tbody></table></div>
+  </section>
+  <div class="foot"><span>连续 20 秒未收到新数据时显示离线</span><span id="last-seen">最近接收时间 —</span></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let historyRows = [];
+let loading = false;
+
+function localTime(value) {
+  return value ? new Date(value).toLocaleString('zh-CN', {hour12:false}) : '—';
+}
+
+function displayNumber(value) {
+  return Number.isFinite(value) ? value.toFixed(1) : '未上报';
+}
+
+function stateText(id, text, kind) {
+  const node = $(id);
+  node.textContent = text;
+  node.className = 'state ' + kind;
+}
+
+function drawChart(canvasId, emptyId, field, fixedRange) {
+  const canvas = $(canvasId);
+  const rect = canvas.getBoundingClientRect();
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = Math.round(rect.width * ratio);
+  canvas.height = Math.round(rect.height * ratio);
+  const context = canvas.getContext('2d');
+  context.scale(ratio, ratio);
+  const width = rect.width, height = rect.height;
+  const left = 42, right = 12, top = 18, bottom = 30;
+  const validRows = historyRows.filter(row => Number.isFinite(row[field]));
+  $(emptyId).hidden = validRows.length > 0;
+  if (!validRows.length) return;
+  const values = validRows.map(row => row[field]);
+  const low = fixedRange ? fixedRange[0] : Math.floor(Math.min(...values) - 1);
+  const high = fixedRange ? fixedRange[1] : Math.ceil(Math.max(...values) + 1);
+  context.font = '11px system-ui';
+  context.lineWidth = 1;
+  for (let index = 0; index <= 4; index++) {
+    const y = top + (height - top - bottom) * index / 4;
+    context.strokeStyle = '#e6ece6';
+    context.beginPath();
+    context.moveTo(left, y);
+    context.lineTo(width - right, y);
+    context.stroke();
+    context.fillStyle = '#607269';
+    context.fillText((high - (high - low) * index / 4).toFixed(1), 1, y + 4);
+  }
+  const first = Date.parse(historyRows[0].received_at);
+  const last = Date.parse(historyRows[historyRows.length - 1].received_at);
+  const span = Math.max(1, last - first);
+  const x = row => left + (width - left - right) * (last === first ? 0.5 : (Date.parse(row.received_at) - first) / span);
+  const y = row => top + (height - top - bottom) * (high - row[field]) / (high - low);
+  context.strokeStyle = '#17634c';
+  context.lineWidth = 2;
+  context.beginPath();
+  let connected = false;
+  for (const row of historyRows) {
+    if (!Number.isFinite(row[field])) {
+      connected = false;
+      continue;
+    }
+    if (connected) context.lineTo(x(row), y(row));
+    else context.moveTo(x(row), y(row));
+    connected = true;
+  }
+  context.stroke();
+  // Draw samples so isolated values on either side of a missing-data gap stay visible.
+  context.fillStyle = '#17634c';
+  for (const row of validRows) {
+    context.beginPath();
+    context.arc(x(row), y(row), 2, 0, Math.PI * 2);
+    context.fill();
+  }
+  context.fillStyle = '#607269';
+  context.fillText(new Date(first).toLocaleTimeString('zh-CN', {hour12:false}), left, height - 7);
+  const end = new Date(last).toLocaleTimeString('zh-CN', {hour12:false});
+  context.fillText(end, width - right - context.measureText(end).width, height - 7);
+}
+
+function drawCharts() {
+  drawChart('temperature-chart', 'temperature-empty', 'temperature_c');
+  drawChart('humidity-chart', 'humidity-empty', 'humidity_pct', [0, 100]);
+}
+
+function renderStatus(data) {
+  $('temperature').textContent = Number.isFinite(data.temperature_c) ? data.temperature_c.toFixed(1) : '—';
+  $('humidity').textContent = displayNumber(data.humidity_pct);
+  $('humidity').classList.toggle('missing', !Number.isFinite(data.humidity_pct));
+  $('humidity-unit').hidden = !Number.isFinite(data.humidity_pct);
+  $('sequence').textContent = data.seq ?? '—';
+  const labels = {online:['采集中','good'], stale:['采集离线','bad'], awaiting_data:['等待数据','warn']};
+  stateText('device-state', ...(labels[data.data_status] || ['状态未知','warn']));
+  $('device-age').textContent = data.age_seconds === null ? '等待首条有效上报' : `${Math.floor(data.age_seconds)} 秒前收到数据`;
+  stateText('broker-state', data.broker_connected ? '连接正常' : '连接中断', data.broker_connected ? 'good' : 'bad');
+  $('broker-detail').textContent = data.broker_connected ? '已连接并订阅采集主题' : '检查 MQTT 服务及访问凭据';
+  $('updated').textContent = '更新于 ' + new Date(data.observed_at).toLocaleTimeString('zh-CN', {hour12:false});
+  $('last-seen').textContent = '最近接收时间 ' + localTime(data.last_seen_at);
+}
+
+function renderRows(rows) {
+  const body = $('readings');
+  body.replaceChildren();
+  if (!rows.length) {
+    const cell = body.insertRow().insertCell();
+    cell.colSpan = 4;
+    cell.textContent = '等待首条有效上报';
+    return;
+  }
+  for (const item of rows.slice(-10).reverse()) {
+    const row = body.insertRow();
+    const values = [localTime(item.received_at), item.seq, displayNumber(item.temperature_c), displayNumber(item.humidity_pct)];
+    for (const value of values) row.insertCell().textContent = value;
+  }
+}
+
+async function refresh() {
+  if (loading) return;
+  loading = true;
+  try {
+    const responses = await Promise.all([
+      fetch('/api/status', {cache:'no-store'}),
+      fetch('/api/history?limit=120', {cache:'no-store'})
+    ]);
+    if (responses.some(response => !response.ok)) throw Error('HTTP error');
+    const [status, history] = await Promise.all(responses.map(response => response.json()));
+    renderStatus(status);
+    historyRows = history.readings;
+    renderRows(historyRows);
+    drawCharts();
+    $('http-error').hidden = true;
+  } catch (error) {
+    $('http-error').hidden = false;
+  } finally {
+    loading = false;
+  }
+}
+
+$('refresh').addEventListener('click', refresh);
+window.addEventListener('resize', drawCharts);
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

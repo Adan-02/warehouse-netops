@@ -1,0 +1,7 @@
+.pio/
+.vscode/
+include/warehouse_config.h
+include/warehouse_wokwi_config.h
+wokwi.vcd
+*.bin
+*.elf
