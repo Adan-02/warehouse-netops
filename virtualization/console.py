@@ -62,7 +62,11 @@ class Console:
         if '\n' in command or '\r' in command or len(command.encode('utf-8')) > limit:
             raise ValueError(f'Use a single {self.role} console command below {limit} bytes; transfer larger scripts in chunks')
         marker = "WH_END_" + uuid.uuid4().hex
-        self.send("\r")
+        # A previous boot-time UART overrun can leave the interactive shell in
+        # an unfinished quote. CR alone extends that command and never reaches
+        # our result marker. The mutex owns this lab TTY, so cancel any stale
+        # partial input before starting the next independent command.
+        self.send("\x03\r")
         time.sleep(0.15)
         self.read()
         self.send(command + "; printf '\\n" + marker + ":%s\\n' \"$?\"\r")
