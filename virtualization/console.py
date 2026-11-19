@@ -1,5 +1,6 @@
 """Use the VM's local COM1 named pipe, without adding a management network."""
 import json
+import re
 import time
 import uuid
 import win32file
@@ -79,30 +80,45 @@ class VmSerialShell:
             if len(data) > UART_WRITE_CHUNK_BYTES:
                 time.sleep(UART_WRITE_PAUSE_SECONDS)
 
+    def _completion(self, marker, deadline):
+        result = ''
+        while time.monotonic() < deadline:
+            result += self.read()
+            # Echoed printf source contains literal escapes, not a result line.
+            match = re.search(r'(?:\r?\n)' + marker + r':(\d+)(?:\r?\n)', result)
+            if match:
+                return {'exit_code': int(match.group(1)), 'output': result[:match.start()]}
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+        return None
+
+    def _prepare_shell(self, deadline):
+        # A newly activated getty can consume the first line before its shell
+        # accepts input. Retry only this idempotent printf, never caller code.
+        for _ in range(3):
+            if time.monotonic() >= deadline:
+                break
+            self.send('\x03\r')
+            time.sleep(min(0.15, max(0, deadline - time.monotonic())))
+            self.read()
+            marker = 'WH_READY_' + uuid.uuid4().hex
+            self.send("printf '\\n" + marker + ":0\\n'\r")
+            ready = self._completion(marker, min(deadline, time.monotonic() + 1.5))
+            if ready is not None and ready['exit_code'] == 0:
+                return
+        raise TimeoutError(f'{self.role} console shell readiness timed out')
+
     def command(self, command, timeout=30):
         limit = command_limit(self.role)
         if '\n' in command or '\r' in command or len(command.encode('utf-8')) > limit:
             raise ValueError(f'Use a single {self.role} console command below {limit} bytes; transfer larger scripts in chunks')
+        deadline = time.monotonic() + max(0, timeout)
+        self._prepare_shell(deadline)
         marker = "WH_END_" + uuid.uuid4().hex
-        # A previous boot-time UART overrun can leave the interactive shell in
-        # an unfinished quote. CR alone extends that command and never reaches
-        # our result marker. The mutex owns this lab TTY, so cancel any stale
-        # partial input before starting the next independent command.
-        self.send("\x03\r")
-        time.sleep(0.15)
-        self.read()
         self.send(command + "; printf '\\n" + marker + ":%s\\n' \"$?\"\r")
-        result = ""
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            result += self.read()
-            # Ignore echoed command, match only a completed result line.
-            import re
-            match = re.search(r"(?:\r?\n)" + marker + r":(\d+)(?:\r?\n)", result)
-            if match:
-                return {"exit_code": int(match.group(1)), "output": result[:match.start()]}
-            time.sleep(0.1)
-        raise TimeoutError("Local VM console command timed out")
+        result = self._completion(marker, deadline)
+        if result is not None:
+            return result
+        raise TimeoutError(f'{self.role} console command completion timed out')
 
 
 class Console(VmSerialShell):

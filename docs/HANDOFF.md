@@ -54,6 +54,10 @@ python virtualization/install_observers.py status
 
 VMware 中已关机的标签仍可能占用配置；确认关机后关闭对应标签，再重试。不要删除锁、接管文件权限或结束整个 VMware 进程。各类串口检查共享整场操作排他锁，等待另一项检查完成是正常现象。
 
+串口发送业务命令前先确认 shell 就绪；只有幂等确认探针会自动重试，业务命令只发送一次。超时区分角色及 `readiness`／`completion` 阶段。执行结果未知时先检查实际状态，尤其不要直接重发发布、关机或故障命令。
+
+身份路径验收只读取 Broker 最近一小时、最多 2000 行的连接日志。长期连接的认证记录超出窗口时，即使采样正常也可能返回 `inconclusive`；它表示证据不足。受控采集测试恢复发布器、产生新连接后可以复验，不能仅凭 PUBACK 把认证结论改成通过。
+
 ## 读代码的顺序
 
 1. `server/app/main.py`：HTTP 路由与 MQTT 回调；`state.py` 的 `TelemetryService`：唯一业务协调器，兼容旧 `TelemetryStore` 名称。
@@ -85,6 +89,6 @@ Git 回退改变源码；应用回滚切换 `current/previous` 对应镜像；�
 - [项目设计与数据契约](../PROJECT.md) · [当前进度](../PROGRESS.md)
 - [虚拟实验与访问矩阵](virtual-lab.md) · [演示手册](demo-runbook.md)
 - [服务接口与单元测试](../server/README.md) · [观测身份与 Webhook](../ops/README.md)
-- [发布、回滚和备份](versioning.md) · [分版本验证记录](verification-v0.5.md)
+- [发布、回滚和备份](versioning.md) · [v0.5 验证](verification-v0.5.md) · [v0.5.1 验证](verification-v0.5.1.md)
 
 换电脑前先盘点 VMware、LAN Segment、锁定镜像、私密配置、SSH 主机 pin 与既有云状态。这些前置不都包含在 Git 中，软件演示可以独立启动，完整环境不能仅凭一次 clone 宣称已重建。

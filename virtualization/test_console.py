@@ -22,20 +22,45 @@ else:
 
 
 class FakeConsole(console_module.Console):
-    def __init__(self,output,role='office'):
+    def __init__(self,output,role='office',dropped_ready=0,suppress_completion=False):
         self.role=role;self.sent=[];self.output=output;self.pending=[]
+        self.dropped_ready=dropped_ready;self.suppress_completion=suppress_completion
+        self.ready_attempts=0;self.ready_acknowledged=False
 
     def send(self,value):
         self.sent.append(value)
-        if len(self.sent)==1:self.pending=['old partial shell input\r\n']
-        else:
+        if value=='\x03\r':self.pending=['old partial shell input\r\n']
+        elif 'WH_READY_' in value:
+            self.ready_attempts+=1
+            marker=re.search(r'WH_READY_[a-f0-9]+',value).group()
+            # Echo is not proof that getty has executed the line.
+            self.pending=[value+'\r\n']
+            if self.ready_attempts>self.dropped_ready:
+                self.pending += ['\r\n'+marker[:8],marker[8:]+':0\r\n']
+        elif 'WH_END_' in value:
+            if not self.ready_acknowledged:
+                raise AssertionError('Caller code sent before shell acknowledgement')
             marker=re.search(r'WH_END_[a-f0-9]+',value).group()
+            if self.suppress_completion:
+                self.pending=[value+'\r\n']
+                return
             wire=value+'\r\n'+self.output+'\r\n'+marker+':1\r\n'
-            # A marker crossing receive chunks must still be recognized.
             cut=wire.rfind(marker)+8
             self.pending=[wire[:cut],wire[cut:]]
+        else:
+            raise AssertionError('Unexpected fake TTY input')
 
-    def read(self):return self.pending.pop(0) if self.pending else ''
+    def read(self):
+        chunk=self.pending.pop(0) if self.pending else ''
+        if ':0\r\n' in chunk and 'WH_READY_' not in chunk:
+            self.ready_acknowledged=True
+        return chunk
+
+
+class FakeClock:
+    def __init__(self):self.now=0.0
+    def monotonic(self):return self.now
+    def sleep(self,seconds):self.now+=seconds
 
 
 class ConsoleProtocolTests(unittest.TestCase):
@@ -60,6 +85,40 @@ class ConsoleProtocolTests(unittest.TestCase):
         console=SilentConsole('')
         with mock.patch.object(console_module.time,'sleep'),self.assertRaises(TimeoutError):
             console.command('true',timeout=0)
+
+    def test_boot_activation_retries_only_readiness_before_caller_code(self):
+        console=FakeConsole('completed',role='service',dropped_ready=1)
+        clock=FakeClock()
+        with mock.patch.object(console_module.time,'monotonic',clock.monotonic), \
+                mock.patch.object(console_module.time,'sleep',clock.sleep):
+            result=console.command('record-one-operation',timeout=8)
+        self.assertEqual(console.ready_attempts,2)
+        self.assertEqual(sum('WH_END_' in value for value in console.sent),1)
+        self.assertEqual(result['exit_code'],1)
+        self.assertNotIn('WH_READY_',result['output'])
+        self.assertLess(clock.now,8)
+
+    def test_readiness_failure_is_bounded_and_never_sends_caller_code(self):
+        console=FakeConsole('',role='router',dropped_ready=99)
+        clock=FakeClock()
+        with mock.patch.object(console_module.time,'monotonic',clock.monotonic), \
+                mock.patch.object(console_module.time,'sleep',clock.sleep), \
+                self.assertRaisesRegex(TimeoutError,'router console shell readiness') as error:
+            console.command('private-caller-argument',timeout=8)
+        self.assertEqual(console.ready_attempts,3)
+        self.assertFalse(any('WH_END_' in value for value in console.sent))
+        self.assertNotIn('private-caller-argument',str(error.exception))
+        self.assertLess(clock.now,8)
+
+    def test_lost_completion_never_replays_an_acknowledged_caller_command(self):
+        console=FakeConsole('',role='iot',suppress_completion=True)
+        clock=FakeClock()
+        with mock.patch.object(console_module.time,'monotonic',clock.monotonic), \
+                mock.patch.object(console_module.time,'sleep',clock.sleep), \
+                self.assertRaisesRegex(TimeoutError,'iot console command completion'):
+            console.command('one-side-effect',timeout=2)
+        self.assertEqual(console.ready_attempts,1)
+        self.assertEqual(sum('WH_END_' in value for value in console.sent),1)
 
 
 @unittest.skipUnless(os.name=='posix','A real POSIX PTY is exercised in the Linux container/CI')
