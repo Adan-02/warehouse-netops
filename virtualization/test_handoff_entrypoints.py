@@ -119,7 +119,7 @@ class ManagementAliasTests(unittest.TestCase):
         client = mock.Mock()
         with mock.patch.object(cloud_connection.paramiko, 'SSHConfig', return_value=configuration), \
                 mock.patch.object(cloud_connection.paramiko, 'SSHClient', return_value=client), \
-                mock.patch('builtins.open', mock.mock_open()), \
+                mock.patch.object(Path, 'open', mock.mock_open()), \
                 mock.patch.object(Path, 'is_file', return_value=True):
             result = cloud_connection.connect_guangzhou({'cloud_ssh_alias':'renamed-owned-alias'})
         return configuration, client, result
