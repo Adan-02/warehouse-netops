@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "runtime_dir": "C:/Users/YOUR_USER/Documents/Codex/warehouse-netops-runtime",
+  "vmrun": "C:/Program Files (x86)/VMware/VMware Workstation/vmrun.exe",
+  "vmware_preferences": "C:/Users/YOUR_USER/AppData/Roaming/VMware/preferences.ini",
+  "cloud_ssh_alias": "tencent-qq-ops",
+  "tools_image": "warehouse-vm-tools:20261119"
+}

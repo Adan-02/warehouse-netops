@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <cmath>
 #include <cstring>
+#include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
@@ -48,6 +49,7 @@ DHTesp sensor;
 QueueHandle_t readings = nullptr;
 uint32_t sequence = 0;
 uint32_t lastSampleStarted = 0;
+char bootId[33] = {};
 
 bool elapsed(uint32_t now, uint32_t since, uint32_t duration) {
     return static_cast<uint32_t>(now - since) >= duration;
@@ -97,7 +99,7 @@ void networkTask(void *) {
     mqtt.setServer(WAREHOUSE_MQTT_HOST, WAREHOUSE_MQTT_PORT);
     mqtt.setSocketTimeout(2);
     mqtt.setKeepAlive(15);
-    mqtt.setBufferSize(256);
+    mqtt.setBufferSize(384);
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
     WiFi.persistent(false);
@@ -157,11 +159,11 @@ void networkTask(void *) {
                 havePending = false;
             }
             if (havePending) {
-                char payload[192];
+                char payload[256];
                 const int length = snprintf(
                     payload, sizeof(payload),
-                    "{\"device_id\":\"%s\",\"seq\":%lu,\"temperature_c\":%.2f,\"humidity_pct\":%.2f}",
-                    WAREHOUSE_DEVICE_ID, static_cast<unsigned long>(pending.seq),
+                    "{\"device_id\":\"%s\",\"boot_id\":\"%s\",\"seq\":%lu,\"temperature_c\":%.2f,\"humidity_pct\":%.2f}",
+                    WAREHOUSE_DEVICE_ID, bootId, static_cast<unsigned long>(pending.seq),
                     pending.temperature, pending.humidity);
                 if (length > 0 && static_cast<size_t>(length) < sizeof(payload) &&
                     mqtt.publish(WAREHOUSE_MQTT_TOPIC, payload, false)) {
@@ -177,6 +179,11 @@ void networkTask(void *) {
 
 void setup() {
     Serial.begin(115200);
+    uint8_t identity[16];
+    esp_fill_random(identity, sizeof(identity));
+    for (size_t i = 0; i < sizeof(identity); ++i) {
+        snprintf(bootId + i * 2, sizeof(bootId) - i * 2, "%02x", identity[i]);
+    }
     readings = xQueueCreate(1, sizeof(Reading));
     if (readings == nullptr) {
         Serial.println("Cannot allocate telemetry queue.");

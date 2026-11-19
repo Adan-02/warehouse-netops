@@ -41,10 +41,11 @@ MQTT 设备账号仅能发布自己的主题，看板账号仅读取该主题。
 主题为 `warehouse/cabinet-01/telemetry`。
 
 ```json
-{"device_id":"cabinet-01","seq":1,"temperature_c":24.5,"humidity_pct":48.2}
+{"device_id":"cabinet-01","boot_id":"5a5beefb91244a12a3a938bd29dab834","seq":1,"temperature_c":24.5,"humidity_pct":48.2}
 ```
 
 - `seq` 为每次启动后的有效采样序号。
+- `boot_id` 为每次启动生成的 32 位小写十六进制标识，重连保持不变；去重键为设备、启动标识和序号，旧消息继续兼容。
 - 温度为有限数字，湿度为有限数字且在 0–100 之间。
 - 新固件成对上报。服务端兼容旧温度消息，缺失湿度记为 null 并显示“未上报”。
 - 已提供但无效的湿度会导致整条消息被忽略，不更新在线时间。

@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.request
 
-from lab import PROJECT, ROOT, SERVER, compose, publish_demo, status
+from lab import PROJECT, ROOT, SERVER, compose, compose_arguments, publish_demo, status
 
 
 def wait_for(base_url, predicate, description, timeout=45):
@@ -126,8 +126,7 @@ finally:
             password = compose("exec", "-T", "broker", "sh", "-c",
                                'printf %s "$MQTT_DEVICE_PASSWORD"', capture=True).stdout
             result = subprocess.run(
-                ["docker", "compose", "--project-name", PROJECT, "-f", str(SERVER / "compose.yaml"),
-                 "exec", "-T", "dashboard", "python", "-c", probe],
+                compose_arguments("exec", "-T", "dashboard", "python", "-c", probe),
                 cwd=SERVER, input=json.dumps({"password": password, "reading": {
                     "device_id": "cabinet-01", "seq": sequence_base + 3,
                     "temperature_c": 26.5, "humidity_pct": 49.0,

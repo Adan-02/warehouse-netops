@@ -87,7 +87,9 @@ MQTT 主题为 `warehouse/cabinet-01/telemetry`：
 
 ```sh
 python -m pip install -r server/requirements.txt
-python -m unittest discover -s server/tests -v
+cd server
+python -m unittest discover -s tests -v
+cd ..
 python -m unittest discover -s tools/tests -v
 ```
 

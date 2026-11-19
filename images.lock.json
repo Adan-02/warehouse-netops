@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "description": "Official checksums captured for the accepted virtual lab on 2026-11-19. A mutable URL never permits a different image checksum.",
+  "images": [
+    {
+      "url": "https://downloads.openwrt.org/releases/25.12.6/targets/x86/64/openwrt-25.12.6-x86-64-generic-ext4-combined.img.gz",
+      "filename": "openwrt-25.12.6-x86-64-generic-ext4-combined.img.gz",
+      "checksum": "f8538784d0288b4133a99ac2a68443e4922ffde6343e80df56a5882364b9d499",
+      "algorithm": "sha256"
+    },
+    {
+      "url": "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2",
+      "filename": "debian-13-generic-amd64.qcow2",
+      "checksum": "e53a93ef33f828ceed0e7278c2cc2753bdc7d5098fbfae15bd64b6d878db350ea3744247763a1c8ecb6b4019a0f623c38caf6038ad6f9c357fb4e01493ddf1a3",
+      "algorithm": "sha512"
+    }
+  ]
+}

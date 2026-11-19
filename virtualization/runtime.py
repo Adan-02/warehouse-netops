@@ -10,14 +10,19 @@ import urllib.request
 import re
 import shutil
 from datetime import datetime, timezone
+try:
+    from .lab_profile import load_profile
+except ImportError:
+    from lab_profile import load_profile
 
 PROJECT = Path(__file__).resolve().parents[1]
-RUNTIME = Path.home() / "Documents/Codex/warehouse-netops-runtime"
+PROFILE = load_profile()
+RUNTIME = Path(PROFILE['runtime_dir'])
 IMAGES = RUNTIME / "images"
 VMS = RUNTIME / "vms"
 PRIVATE = PROJECT / ".secrets/virtual-lab"
-VMRUN = Path("D:/VMware/vmrun.exe")
-TOOLS_IMAGE = "warehouse-vm-tools:20261119"
+VMRUN = Path(PROFILE['vmrun'])
+TOOLS_IMAGE = PROFILE['tools_image']
 MACS = {
     "router": ["00:50:56:21:10:01", "00:50:56:21:10:02", "00:50:56:21:10:03", "00:50:56:21:10:04"],
     "service": ["00:50:56:21:20:01"],
@@ -28,7 +33,7 @@ MACS = {
 
 def lan_segments() -> dict[str, str]:
     """Read only the three named LAN segments created in VMware's editor."""
-    pref = Path(os.environ["APPDATA"]) / "VMware/preferences.ini"
+    pref = Path(PROFILE['vmware_preferences'])
     text = pref.read_text(encoding="utf-8", errors="replace")
     values = dict(re.findall(r'^\s*(pref\.namedPVNs\d+\.(?:name|pvnID))\s*=\s*"([^"\n]+)"', text, re.M))
     found = {}
@@ -73,7 +78,7 @@ def download(url: str, target: Path, expected: str, algorithm: str = "sha256") -
             if done % (32 * 1024 * 1024) == 0:
                 print(f"Downloading {target.name}: {done // (1024*1024)} MiB", flush=True)
     if digest(partial, algorithm) != expected:
-        raise ValueError(f"Checksum mismatch for {target.name}; partial file retained")
+        raise ValueError(f"Checksum mismatch for {target.name}; partial file retained. The locked image was not replaced. Review and explicitly update images.lock.json before accepting a changed upstream image.")
     partial.replace(target)
     print(f"Downloaded and verified {target.name}", flush=True)
 

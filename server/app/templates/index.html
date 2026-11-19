@@ -49,6 +49,16 @@
     button:hover { background:#edf5ef; }
     button:focus-visible { outline:3px solid #8ac3ab; outline-offset:2px; }
     [hidden] { display:none!important; }
+    .health-grid { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); border-top:1px solid var(--line); }
+    .health-cell { padding:16px 12px 10px 0; min-width:0; }
+    .health-cell .state { font-size:17px; padding-top:7px; }
+    .health-cell .detail { font-size:11px; }
+    .toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:12px; }
+    select { font:inherit; border:1px solid var(--line); padding:6px 9px; background:white; color:var(--ink); }
+    .event-active { color:var(--red); font-weight:600; }
+    .event-closed { color:var(--green); }
+    @media(max-width:850px) { .health-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+    @media(max-width:500px) { .health-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
     @media(max-width:850px) {
       .summary { grid-template-columns:1fr 1fr; }
       .metric:nth-child(2) { border-right:0; }
@@ -71,7 +81,7 @@
 </head>
 <body>
 <header>
-  <div><h1>仓库温湿度监测</h1><p>机柜环境与采集链路状态</p></div>
+  <div><h1>仓库网络与环境监测</h1><p>网络路径、采集链路与温湿度记录</p></div>
   <div class="live">每 2 秒更新<span id="updated">正在读取状态</span></div>
 </header>
 <main>
@@ -91,9 +101,20 @@
     <div class="metric"><div class="label">采集状态</div><div class="state warn" id="device-state" aria-live="polite">等待数据</div><div class="detail" id="device-age">等待首条有效上报</div></div>
     <div class="metric"><div class="label">消息服务</div><div class="state warn" id="broker-state">连接中</div><div class="detail" id="broker-detail">正在确认 MQTT 订阅</div></div>
   </div>
+  <section aria-labelledby="ops-title">
+    <div class="section-head"><h2 id="ops-title">运维总览</h2><span id="health-observed">等待新的现场观测</span></div>
+    <div class="health-grid" id="health-grid"></div>
+    <div class="detail" id="ingestion-detail">正在读取入库状态</div>
+  </section>
+  <section class="toolbar" aria-label="历史时间范围">
+    <label for="history-range">历史范围</label>
+    <select id="history-range"><option value="10m">最近 10 分钟</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option></select>
+    <button id="export-csv" type="button">导出 CSV</button>
+    <span class="detail" id="history-note">按接收时间记录 · 缺测处断线</span>
+  </section>
   <div class="charts">
     <section>
-      <div class="section-head"><h2>温度变化</h2><span>最近 120 条有效采样 · °C</span></div>
+      <div class="section-head"><h2>温度变化</h2><span id="temperature-range-label">最近 120 条有效采样 · °C</span></div>
       <div class="plot"><canvas id="temperature-chart" aria-label="机柜温度历史曲线" role="img"></canvas><div class="empty" id="temperature-empty">等待有效温度上报</div></div>
     </section>
     <section>
@@ -105,12 +126,29 @@
     <div class="section-head"><h2>最近上报</h2><button id="refresh" type="button">立即刷新</button></div>
     <div class="table-wrap"><table><thead><tr><th>接收时间</th><th>消息序号</th><th>温度 °C</th><th>湿度 %RH</th></tr></thead><tbody id="readings"><tr><td colspan="4">等待首条有效上报</td></tr></tbody></table></div>
   </section>
-  <div class="foot"><span>连续 20 秒未收到新数据时显示离线</span><span id="last-seen">最近接收时间 —</span></div>
+  <section aria-labelledby="events-title">
+    <div class="section-head"><h2 id="events-title">故障与告警事件</h2><span id="events-state">等待事件记录</span></div>
+    <div class="table-wrap"><table><thead><tr><th>检测时间</th><th>事件</th><th>状态</th><th>持续时间</th></tr></thead><tbody id="events"><tr><td colspan="4">正在读取</td></tr></tbody></table></div>
+    <div class="detail">演示阈值由模拟配置提供；数据过期不代表温湿度已恢复。</div>
+  </section>
+  <div class="foot"><span id="version-info">正在读取运行版本</span><span id="last-seen">最近接收时间 —</span></div>
 </main>
 <script>
 const $ = id => document.getElementById(id);
 let historyRows = [];
 let loading = false;
+let chartGapMs = 20000;
+let lastHistoryFetch = 0;
+let lastOpsFetch = 0;
+let offlineAfterSeconds = 20;
+const labels = {broker:'消息服务',telemetry:'采样',storage:'入库',wan:'现场 WAN',wireguard:'现场隧道',remote_wireguard:'远程隧道',remote_http:'广州访问'};
+for (const [key,label] of Object.entries(labels)) {
+  const cell=document.createElement('div'); cell.className='health-cell';
+  const name=document.createElement('div'); name.className='label'; name.textContent=label;
+  const value=document.createElement('div'); value.id='health-'+key; value.className='state warn'; value.textContent='未知';
+  const detail=document.createElement('div'); detail.id='health-detail-'+key; detail.className='detail'; detail.textContent='尚无新观测';
+  cell.append(name,value,detail); $('health-grid').append(cell);
+}
 
 function localTime(value) {
   return value ? new Date(value).toLocaleString('zh-CN', {hour12:false}) : '—';
@@ -163,14 +201,18 @@ function drawChart(canvasId, emptyId, field, fixedRange) {
   context.lineWidth = 2;
   context.beginPath();
   let connected = false;
+  let previousTime = null;
   for (const row of historyRows) {
     if (!Number.isFinite(row[field])) {
       connected = false;
       continue;
     }
+    const timestamp=Date.parse(row.received_at);
+    if (previousTime !== null && timestamp-previousTime >= chartGapMs) connected=false;
     if (connected) context.lineTo(x(row), y(row));
     else context.moveTo(x(row), y(row));
     connected = true;
+    previousTime = timestamp;
   }
   context.stroke();
   // Draw samples so isolated values on either side of a missing-data gap stay visible.
@@ -192,6 +234,7 @@ function drawCharts() {
 }
 
 function renderStatus(data) {
+  offlineAfterSeconds=data.offline_after_seconds || 20;
   $('temperature').textContent = Number.isFinite(data.temperature_c) ? data.temperature_c.toFixed(1) : '—';
   $('humidity').textContent = displayNumber(data.humidity_pct);
   $('humidity').classList.toggle('missing', !Number.isFinite(data.humidity_pct));
@@ -204,6 +247,64 @@ function renderStatus(data) {
   $('broker-detail').textContent = data.broker_connected ? '已连接并订阅采集主题' : '检查 MQTT 服务及访问凭据';
   $('updated').textContent = '更新于 ' + new Date(data.observed_at).toLocaleTimeString('zh-CN', {hour12:false});
   $('last-seen').textContent = '最近接收时间 ' + localTime(data.last_seen_at);
+  const counts=data.counters || {};
+  $('ingestion-detail').textContent=`最后入库：${localTime(data.last_persist_success_at || data.last_seen_at)} · 重复 ${counts.duplicates || 0} · 无效 ${counts.rejected || 0} · 入库失败 ${counts.persist_errors || counts.storage_errors || 0}`;
+}
+
+function renderHealth(data) {
+  const states={healthy:['正常','good'],unhealthy:['异常','bad'],unknown:['未知','warn']};
+  for (const key of Object.keys(labels)) {
+    const row=(data.components || {})[key] || {};
+    stateText('health-'+key,...(states[row.state] || states.unknown));
+    $('health-detail-'+key).textContent=`${row.source || '未观测'} · ${row.observed_at ? new Date(row.observed_at).toLocaleTimeString('zh-CN',{hour12:false}) : '等待更新'}`;
+    $('health-'+key).title=JSON.stringify(row.evidence || {});
+  }
+  $('health-observed').textContent='观测于 '+localTime(data.observed_at);
+}
+
+function renderEvents(data) {
+  const body=$('events'); body.replaceChildren();
+  const rows=(data.events || []).slice().reverse();
+  const names={broker_subscription_unavailable:'消息服务不可用',telemetry_stale:'采样过期',storage_write_failed:'数据写入失败',temperature_high:'温度偏高',temperature_low:'温度偏低',humidity_high:'湿度偏高',humidity_low:'湿度偏低',threshold_violation:'环境越限',threshold_exceeded:'环境越限'};
+  if (!rows.length) { const c=body.insertRow().insertCell(); c.colSpan=4; c.textContent='没有事件记录'; }
+  for (const item of rows.slice(0,20)) {
+    const row=body.insertRow(); const open=!item.ended_at;
+    const start=Date.parse(item.started_at || item.detected_at);
+    const end=item.ended_at ? Date.parse(item.ended_at) : Date.now();
+    const seconds=Math.max(0,Math.floor((end-start)/1000));
+    const ruleNames={'temperature_c.high':'温度偏高','temperature_c.low':'温度偏低','humidity_pct.high':'湿度偏高','humidity_pct.low':'湿度偏低',temperature_c_high:'温度偏高',temperature_c_low:'温度偏低',humidity_pct_high:'湿度偏高',humidity_pct_low:'湿度偏低'};
+    const title=ruleNames[item.rule_id] || names[item.event_type] || item.event_type;
+    const state=open?(item.recovery_observation==='unknown'?'缺测，无法确认恢复':'进行中'):(item.end_reason==='observation_interrupted'?'观测中断':'已恢复');
+    const values=[localTime(item.detected_at || item.started_at),title,state,Number.isFinite(seconds)?seconds+' 秒':'—'];
+    values.forEach((value,index)=>{ const c=row.insertCell();c.textContent=value;if(index===2)c.className=open?'event-active':'event-closed'; });
+  }
+  $('events-state').textContent=rows.filter(row=>!row.ended_at).length+' 个活动事件';
+}
+
+async function readJson(path) {
+  const response=await fetch(path,{cache:'no-store'});
+  if (!response.ok) throw Error('HTTP '+response.status);
+  return response.json();
+}
+
+function selectedRange() {
+  const duration={'10m':600000,'24h':86400000,'7d':604800000}[$('history-range').value];
+  const end=new Date();return {start:new Date(end.getTime()-duration).toISOString(),end:end.toISOString()};
+}
+
+async function fetchHistory() {
+  const mode=$('history-range').value;
+  if (mode==='10m') {
+    const result=await readJson('/api/history?limit=120');historyRows=result.readings;chartGapMs=offlineAfterSeconds*1000;
+    $('temperature-range-label').textContent='最近 120 条有效采样 · °C';
+  } else {
+    const range=selectedRange();
+    const result=await readJson('/api/history/range?'+new URLSearchParams({...range,resolution:'auto'}));
+    historyRows=(result.buckets || []).map(bucket=>({received_at:bucket.started_at,seq:'—',temperature_c:bucket.temperature_c?.avg ?? null,humidity_pct:bucket.humidity_pct?.avg ?? null}));
+    chartGapMs=(result.resolution_seconds || 60)*1500;
+    $('temperature-range-label').textContent=(mode==='24h'?'最近 24 小时':'最近 7 天')+' · 时间桶均值';
+  }
+  renderRows(historyRows);drawCharts();lastHistoryFetch=Date.now();
 }
 
 function renderRows(rows) {
@@ -226,25 +327,33 @@ async function refresh() {
   if (loading) return;
   loading = true;
   try {
-    const responses = await Promise.all([
-      fetch('/api/status', {cache:'no-store'}),
-      fetch('/api/history?limit=120', {cache:'no-store'})
-    ]);
-    if (responses.some(response => !response.ok)) throw Error('HTTP error');
-    const [status, history] = await Promise.all(responses.map(response => response.json()));
-    renderStatus(status);
-    historyRows = history.readings;
-    renderRows(historyRows);
-    drawCharts();
+    renderStatus(await readJson('/api/status'));
     $('http-error').hidden = true;
+    const historyInterval=$('history-range').value==='10m'?2000:10000;
+    if (Date.now()-lastHistoryFetch>=historyInterval) {
+      try {await fetchHistory();$('history-note').textContent='按接收时间记录 · 缺测处断线';}
+      catch(error) {$('history-note').textContent='历史暂不可读，实时诊断继续更新';}
+    }
+    if (Date.now()-lastOpsFetch>=5000) {
+      const results=await Promise.allSettled([readJson('/api/health'),readJson('/api/events?limit=50')]);
+      if(results[0].status==='fulfilled')renderHealth(results[0].value);
+      else for(const key of Object.keys(labels))stateText('health-'+key,'未知','warn');
+      if(results[1].status==='fulfilled')renderEvents(results[1].value);
+      else $('events-state').textContent='事件存储暂不可读';
+      lastOpsFetch=Date.now();
+    }
   } catch (error) {
     $('http-error').hidden = false;
+    for(const key of Object.keys(labels))stateText('health-'+key,'未知','warn');
   } finally {
     loading = false;
   }
 }
 
 $('refresh').addEventListener('click', refresh);
+$('history-range').addEventListener('change',()=>{lastHistoryFetch=0;refresh();});
+$('export-csv').addEventListener('click',()=>{window.location.href='/api/history/export.csv?'+new URLSearchParams(selectedRange());});
+readJson('/api/version').then(value=>{$('version-info').textContent=`${value.version || '本地版本'} · ${(value.git_commit || '').slice(0,12)}`;}).catch(()=>{$('version-info').textContent='版本信息暂不可读';});
 window.addEventListener('resize', drawCharts);
 refresh();
 setInterval(refresh, 2000);

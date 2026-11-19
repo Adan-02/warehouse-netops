@@ -44,7 +44,7 @@ class FakeRunner(matrix.MatrixRunner):
         return data
 
     def router(self):
-        snapshot = rules(office=0 if self.no_counter else min(self.index, 1) * 2, iot=0 if self.no_counter else max(self.index - 1, 0) * 2)
+        snapshot = rules(office=0 if self.no_counter else self.probed.count('office')*2, iot=0 if self.no_counter else self.probed.count('iot')*2)
         self.index += 1
         return {"fw4_check_exit": 0, "rules": snapshot, "fingerprint": matrix.rules_fingerprint(snapshot)}
 
@@ -59,7 +59,7 @@ class MatrixTests(unittest.TestCase):
 
     def test_serial_line_size_and_scripts_compile(self):
         for role in matrix.ADDRESSES:
-            for purpose in ("inventory", "probes"):
+            for purpose in ("inventory", "probes", 'probe_22','probe_1883','probe_8080'):
                 code = matrix.guest_script(role, purpose, "WH_MATRIX_" + "a" * 32 + "_")
                 compile(code, "<guest>", "exec")
                 self.assertLess(len(matrix.encoded_python(code).encode()), 3900)

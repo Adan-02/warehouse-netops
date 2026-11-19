@@ -5,21 +5,30 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "server"
-PROJECT = "warehouse-netops"
+PROJECT = os.environ.get('WAREHOUSE_COMPOSE_PROJECT','warehouse-netops')
+BOOT_ID = uuid.uuid4().hex
+
+
+def compose_arguments(*arguments):
+    result=['docker','compose','--project-name',PROJECT,'-f',str(SERVER/'compose.yaml')]
+    if os.environ.get('WAREHOUSE_ENV_FILE'):result+=['--env-file',os.environ['WAREHOUSE_ENV_FILE']]
+    return result+list(arguments)
 
 
 def compose(*arguments: str, capture: bool = False) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["docker", "compose", "--project-name", PROJECT, "-f", str(SERVER / "compose.yaml"), *arguments],
+        compose_arguments(*arguments),
         cwd=SERVER,
         check=True,
         text=True,
@@ -34,7 +43,7 @@ def status(base_url: str) -> dict:
 
 
 def publish_demo(seq: int, temperature: float, humidity: float | None = None) -> None:
-    reading = {"device_id": "cabinet-01", "seq": seq, "temperature_c": temperature}
+    reading = {"device_id": "cabinet-01", "boot_id": BOOT_ID, "seq": seq, "temperature_c": temperature}
     if humidity is not None:
         reading["humidity_pct"] = humidity
     payload = json.dumps(reading, separators=(",", ":"))

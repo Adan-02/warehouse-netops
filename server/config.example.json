@@ -1,0 +1,11 @@
+{
+  "profile": "simulated_demo",
+  "retention": {"readings_days": 90, "events_days": 180},
+  "alerts": {
+    "enabled": true,
+    "trigger_seconds": 30,
+    "recovery_seconds": 30,
+    "temperature_c": {"min": 18, "max": 28, "hysteresis": 1},
+    "humidity_pct": {"min": 30, "max": 70, "hysteresis": 3}
+  }
+}

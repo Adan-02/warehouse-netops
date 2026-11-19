@@ -9,9 +9,9 @@ Type=oneshot
 RemainAfterExit=yes
 User=warehouse
 SupplementaryGroups=docker
-WorkingDirectory=/opt/warehouse-netops/server
-ExecStart=/usr/bin/docker compose --project-name warehouse-netops up -d --no-build --pull never --wait --wait-timeout 120
-ExecStop=/usr/bin/docker compose --project-name warehouse-netops stop
+WorkingDirectory=/opt/warehouse-netops/current/server
+ExecStart=/usr/bin/docker compose --env-file /opt/warehouse-netops/shared/server.env --project-name warehouse-netops up -d --no-build --pull never --wait --wait-timeout 120
+ExecStop=/usr/bin/docker compose --env-file /opt/warehouse-netops/shared/server.env --project-name warehouse-netops stop
 TimeoutStartSec=180
 
 [Install]

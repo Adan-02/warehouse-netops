@@ -22,6 +22,8 @@ def is_running(role, active):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=('status','start','stop'))
+    parser.add_argument('--wait', action='store_true', help='Wait for fresh local and Guangzhou business health after start')
+    parser.add_argument('--timeout',type=int,default=300)
     args = parser.parse_args()
     if args.action == 'start':
         for role in ROLES:
@@ -46,6 +48,17 @@ def main():
             print(role+': stopped',flush=True)
     active = running()
     print(json.dumps({role:'running' if is_running(role,active) else 'stopped' for role in ROLES},indent=2))
+    if args.wait:
+        if args.action != 'start': parser.error('--wait requires start')
+        from live_health import observe
+        from cloud_connection import connect_guangzhou
+        deadline=time.monotonic()+args.timeout
+        while True:
+            health=observe(Console,connect_guangzhou)
+            print(json.dumps({'business_readiness':health['state'],'observed_at':health['observed_at']}),flush=True)
+            if health['state']=='healthy': break
+            if time.monotonic()>=deadline: raise RuntimeError('VM processes are running but business readiness did not pass')
+            time.sleep(5)
 
 
 if __name__ == '__main__':

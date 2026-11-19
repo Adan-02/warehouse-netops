@@ -1,0 +1,4 @@
+-r server/requirements.txt
+paramiko==5.0.0
+cryptography==46.0.4
+pywin32==311; sys_platform == 'win32'

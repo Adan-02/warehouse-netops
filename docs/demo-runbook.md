@@ -28,7 +28,7 @@ python 'D:\CodeHomework\warehouse-netops\virtualization\check_paths.py' --phase 
 python 'D:\CodeHomework\warehouse-netops\virtualization\verify_remote.py'
 ```
 
-准备好已有的 [访问矩阵](D:/CodeHomework/warehouse-netops/evidence/virtual-matrix.json)、[身份与隔离记录](D:/CodeHomework/warehouse-netops/evidence/virtual-paths.json)、[广州记录](D:/CodeHomework/warehouse-netops/evidence/virtual-remote.json) 与两种故障证据。所有验收顺序运行，不同时开多份故障脚本。脚本最终 `restoration.verified` 为 `true` 才能继续下一项。
+准备好已有的 `evidence/virtual-matrix.json`、`evidence/virtual-paths.json`、`evidence/virtual-remote.json` 与两种故障证据。所有验收顺序运行，不同时开多份故障脚本。脚本最终 `restoration.verified` 为 `true` 才能继续下一项。
 
 ## 0:00–1:30，权限与看板
 
@@ -88,9 +88,9 @@ python 'D:\CodeHomework\warehouse-netops\virtualization\check_faults.py' --phase
 
 ## 6:15–7:00，解释证据与后续
 
-只挑关键字段：源地址和端口、拒绝计数增量、故障实际保持时间、序号变化、恢复验证。可先展示 [总验收记录](D:/CodeHomework/warehouse-netops/evidence/virtual-verification.json) 的 `status: passed`，再挑对应报告解释；无需逐行翻日志或解释部署内部结构。
+只挑关键字段：源地址和端口、拒绝计数增量、故障实际保持时间、序号变化、恢复验证。可先展示 `evidence/virtual-verification.json` 的 `status: passed`，再挑对应报告解释；无需逐行翻日志或解释部署内部结构。
 
-宿主 WAN 直入已完成 9 项验收：TCP 22、1883、8080 均拒绝，`forward_wan` 拒绝计数分别增加 3、2、2；临时 /32 路由已删除并复核。展示 [WAN 直入证据](D:/CodeHomework/warehouse-netops/evidence/virtual-wan-policy.json) 即可。该结果验证 VMnet8 宿主路径，不等同于公网来源测试。需要独立复测时，在管理员 PowerShell 执行以下命令；它会临时添加并清理自己的精确路由，不必插入演示时间：
+宿主 WAN 直入已完成 9 项验收：TCP 22、1883、8080 均拒绝，`forward_wan` 拒绝计数分别增加 3、2、2；临时 /32 路由已删除并复核。展示 `evidence/virtual-wan-policy.json` 即可。该结果验证 VMnet8 宿主路径，不等同于公网来源测试。需要独立复测时，在管理员 PowerShell 执行以下命令；它会临时添加并清理自己的精确路由，不必插入演示时间：
 
 ```powershell
 python 'D:\CodeHomework\warehouse-netops\virtualization\check_wan.py' --output 'D:\CodeHomework\warehouse-netops\evidence\virtual-wan-policy.json'

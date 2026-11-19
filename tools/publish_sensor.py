@@ -32,17 +32,28 @@ class PublisherError(Exception):
     """A deliberately credential-free message safe to show to an operator."""
 
 
-def make_payload(sequence: int) -> str:
+def make_payload(sequence: int, boot_id: str | None = None, scenario: str = 'normal') -> str:
     if isinstance(sequence, bool) or not isinstance(sequence, int) or not 1 <= sequence <= MAX_SEQUENCE:
         raise PublisherError("Sequence must be a positive JSON-safe integer.")
     index = sequence - 1
-    return json.dumps(
-        {
+    if boot_id is not None and not re.fullmatch(r'[0-9a-f]{32}', boot_id):
+        raise PublisherError('boot_id must contain 32 lowercase hexadecimal characters.')
+    if scenario not in ('normal','high-temperature','high-humidity','recovery'):
+        raise PublisherError('Unknown simulated scenario.')
+    reading = {
             "device_id": DEVICE_ID,
             "seq": sequence,
             "temperature_c": round(24.0 + 1.2 * math.sin(index / 3), 2),
             "humidity_pct": round(48.0 + 7.0 * math.cos(index / 4), 2),
-        },
+        }
+    if boot_id is not None:
+        reading['boot_id'] = boot_id
+    if scenario == 'high-temperature': reading['temperature_c'] = 32.0
+    if scenario == 'high-humidity': reading['humidity_pct'] = 82.0
+    if scenario == 'recovery':
+        reading['temperature_c'], reading['humidity_pct'] = 24.0, 48.0
+    return json.dumps(
+        reading,
         separators=(",", ":"),
         allow_nan=False,
     )
@@ -95,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interval", type=float, default=5.0)
     parser.add_argument("--connect-timeout", type=float, default=10.0)
     parser.add_argument("--publish-timeout", type=float, default=10.0)
+    parser.add_argument('--scenario', choices=('normal','high-temperature','high-humidity','recovery'), default='normal', help='显式模拟场景；用于告警与恢复演示')
     return parser
 
 
@@ -169,10 +181,11 @@ def run_publisher(args: argparse.Namespace, username: str, password: str, mqtt_m
         if not connect_accepted or not connect_accepted[0]:
             raise PublisherError("MQTT connection/authentication was rejected.")
         sequence = 1
+        boot_id = uuid.uuid4().hex
         while args.count == 0 or sequence <= args.count:
             if disconnected.is_set():
                 raise PublisherError("MQTT disconnected; no further samples were published.")
-            payload = make_payload(sequence)
+            payload = make_payload(sequence, boot_id, getattr(args,'scenario','normal'))
             info = client.publish(TOPIC, payload, qos=1, retain=False)
             if info.rc != mqtt_module.MQTT_ERR_SUCCESS:
                 raise PublisherError("MQTT did not queue the sample.")

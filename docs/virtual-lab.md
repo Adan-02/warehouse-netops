@@ -16,7 +16,7 @@
 
 三个内网分别使用 `wh-office`、`wh-iot`、`wh-service` LAN Segment，没有宿主机适配器。只有路由器 WAN 使用既有 VMnet8；Windows VMnet8 为 `192.168.200.254/24`，NAT 网关为 `192.168.200.1`。
 
-广州只安装独立 peer 与服务机 `/32` 路由，不承担总部网段互通或默认出口。用户已确认在轻量应用服务器防火墙放行 `0.0.0.0/0 → UDP 51830`，见 [生效后的规则截图](D:/CodeHomework/warehouse-netops/evidence/firewall-rule-applied.jpg)。HTTP、SSH 仍经过身份验证的 WireGuard 隧道。
+广州只安装独立 peer 与服务机 `/32` 路由，不承担总部网段互通或默认出口。用户已确认在轻量应用服务器防火墙放行 `0.0.0.0/0 → UDP 51830`，见 `evidence/firewall-rule-applied.jpg`。HTTP、SSH 仍经过身份验证的 WireGuard 隧道。
 
 ## 权限与实测结果
 
@@ -33,16 +33,16 @@
 
 | 验收 | 结果 | 证据 |
 | --- | --- | --- |
-| 本地访问矩阵 | 13 项通过 | [virtual-matrix.json](D:/CodeHomework/warehouse-netops/evidence/virtual-matrix.json) |
-| IoT 身份发布、Office/IoT 双向隔离与清理 | 通过 | [virtual-paths.json](D:/CodeHomework/warehouse-netops/evidence/virtual-paths.json) |
-| 本地停 Broker | 保持 28.27 秒；网页可达，服务断开与数据过期可区分；恢复通过 | [virtual-broker-stop-local.json](D:/CodeHomework/warehouse-netops/evidence/virtual-broker-stop-local.json) |
-| 本地断 WAN | 保持 28.22 秒；现场采样继续；恢复通过 | [virtual-wan-disconnect-local.json](D:/CodeHomework/warehouse-netops/evidence/virtual-wan-disconnect-local.json) |
-| 广州独立 WG 路由、唯一 peer、HTTP、SSH、MQTT 拒绝及保护基线 | 13 项通过，既有保护基线不变 | [virtual-remote.json](D:/CodeHomework/warehouse-netops/evidence/virtual-remote.json) |
-| 带广州观测的断 WAN | 至少 25 秒；本地网页与序号继续、广州网页中断；本地/WAN/广州 HTTP 与握手恢复通过 | [virtual-wan-disconnect.json](D:/CodeHomework/warehouse-netops/evidence/virtual-wan-disconnect.json) |
-| 带广州观测的停 Broker | 至少 25 秒；广州 HTTP 与握手保持、实际 SSH 身份核验通过，Broker 断开且数据过期；本地与广州恢复在线 | [virtual-broker-stop.json](D:/CodeHomework/warehouse-netops/evidence/virtual-broker-stop.json) |
-| 宿主 WAN 直入 | 9 项通过；22/1883/8080 拒绝计数分别增加 3/2/2，临时 /32 路由已删除并复核 | [virtual-wan-policy.json](D:/CodeHomework/warehouse-netops/evidence/virtual-wan-policy.json) |
+| 本地访问矩阵 | 13 项通过 | `evidence/virtual-matrix.json` |
+| IoT 身份发布、Office/IoT 双向隔离与清理 | 通过 | `evidence/virtual-paths.json` |
+| 本地停 Broker | 保持 28.27 秒；网页可达，服务断开与数据过期可区分；恢复通过 | `evidence/virtual-broker-stop-local.json` |
+| 本地断 WAN | 保持 28.22 秒；现场采样继续；恢复通过 | `evidence/virtual-wan-disconnect-local.json` |
+| 广州独立 WG 路由、唯一 peer、HTTP、SSH、MQTT 拒绝及保护基线 | 13 项通过，既有保护基线不变 | `evidence/virtual-remote.json` |
+| 带广州观测的断 WAN | 至少 25 秒；本地网页与序号继续、广州网页中断；本地/WAN/广州 HTTP 与握手恢复通过 | `evidence/virtual-wan-disconnect.json` |
+| 带广州观测的停 Broker | 至少 25 秒；广州 HTTP 与握手保持、实际 SSH 身份核验通过，Broker 断开且数据过期；本地与广州恢复在线 | `evidence/virtual-broker-stop.json` |
+| 宿主 WAN 直入 | 9 项通过；22/1883/8080 拒绝计数分别增加 3/2/2，临时 /32 路由已删除并复核 | `evidence/virtual-wan-policy.json` |
 
-两种带远程观测的故障均已实际通过，本地版保留为此前的独立记录。2026-11-19 管理员完成最后一项 WAN 直入验收后，单电脑与广州服务器的虚拟阶段验收全部通过；该 WAN 结论限于 VMnet8 宿主经 OpenWrt WAN 的受测路径，不等同于公网来源测试。[总验收记录](D:/CodeHomework/warehouse-netops/evidence/virtual-verification.json) 为 `passed`，六组报告均通过，四台 VM 运行正常，原宿主容器及广州保护基线正常。最新整体状态见 [PROGRESS.md](D:/CodeHomework/warehouse-netops/PROGRESS.md)。
+两种带远程观测的故障均已实际通过，本地版保留为此前的独立记录。2026-11-19 管理员完成最后一项 WAN 直入验收后，单电脑与广州服务器的虚拟阶段验收全部通过；该 WAN 结论限于 VMnet8 宿主经 OpenWrt WAN 的受测路径，不等同于公网来源测试。`evidence/virtual-verification.json` 为 `passed`，六组报告均通过，四台 VM 运行正常，原宿主容器及广州保护基线正常。最新整体状态见 [PROGRESS.md](../PROGRESS.md)。
 
 ## 日常启动与查看
 
@@ -96,7 +96,7 @@ python 'D:\CodeHomework\warehouse-netops\virtualization\check_wan.py' --output '
 
 该入口拒绝覆盖已有目标路由，仅临时增加 ActiveStore `192.168.30.10/32 via 192.168.200.50`，绑定源地址 `.200.254` 探测三个指定端口，最后按自身完整身份删除并复核。权限不足返回 `needs_admin`，不提升权限，也不形成拒绝结论。
 
-讲解流程见 [5–8 分钟演示手册](D:/CodeHomework/warehouse-netops/docs/demo-runbook.md)。
+讲解流程见 [5–8 分钟演示手册](demo-runbook.md)。
 
 ## 维护现有环境
 

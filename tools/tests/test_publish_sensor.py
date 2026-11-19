@@ -38,6 +38,17 @@ class PublisherTests(unittest.TestCase):
             with self.assertRaises(publisher.PublisherError):
                 publisher.make_payload(value)
 
+    def test_startup_identity_and_explicit_alarm_scenarios(self):
+        boot = 'a' * 32
+        first = json.loads(publisher.make_payload(1,boot,'high-temperature'))
+        second = json.loads(publisher.make_payload(2,boot,'recovery'))
+        self.assertEqual(first['boot_id'],second['boot_id'])
+        self.assertEqual(first['temperature_c'],32.0)
+        self.assertEqual(second['humidity_pct'],48.0)
+        self.assertEqual(json.loads(publisher.make_payload(1,boot,'high-humidity'))['humidity_pct'],82.0)
+        for value in ('x'*32,'a'*31,'A'*32):
+            with self.assertRaises(publisher.PublisherError): publisher.make_payload(1,value)
+
     def test_private_credentials_as_data(self):
         self.assertEqual(self.credentials("# local\nexport MQTT_DEVICE_USERNAME=cabinet-01\nMQTT_DEVICE_PASSWORD='$(do-not-execute)#private'\nDEMO_MODE=true\n"), ("cabinet-01", "$(do-not-execute)#private"))
         self.assertEqual(self.credentials('MQTT_DEVICE_PASSWORD="a=b#c"\n'), ("cabinet-01", "a=b#c"))

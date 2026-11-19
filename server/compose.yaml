@@ -8,7 +8,7 @@ services:
       MQTT_DEVICE_PASSWORD: ${MQTT_DEVICE_PASSWORD:?Run python setup.py first}
       MQTT_VIEWER_PASSWORD: ${MQTT_VIEWER_PASSWORD:?Run python setup.py first}
     ports:
-      - "${SERVICE_BIND_IP:-127.0.0.1}:1883:1883"
+      - "${SERVICE_BIND_IP:-127.0.0.1}:${MQTT_BIND_PORT:-1883}:1883"
     volumes:
       - ./broker/start.sh:/etc/warehouse/start.sh:ro
       - ./broker/acl:/etc/warehouse/acl:ro
@@ -21,7 +21,13 @@ services:
       retries: 3
       start_period: 10s
   dashboard:
-    build: .
+    image: ${DASHBOARD_IMAGE:-warehouse-netops-dashboard:local}
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        SOURCE_SHA256: ${SOURCE_SHA256:-unknown}
     environment:
       MQTT_HOST: broker
       MQTT_PORT: "1883"
@@ -30,10 +36,14 @@ services:
       SQLITE_PATH: /data/warehouse.sqlite3
       OFFLINE_AFTER_SECONDS: "20"
       DEMO_MODE: ${DEMO_MODE:-false}
+      WAREHOUSE_CONFIG_FILE: /etc/warehouse/config.json
+      OBSERVATIONS_DIR: /run/warehouse/observations
     ports:
-      - "${SERVICE_BIND_IP:-127.0.0.1}:8080:8080"
+      - "${SERVICE_BIND_IP:-127.0.0.1}:${HTTP_BIND_PORT:-8080}:8080"
     volumes:
       - dashboard_data:/data
+      - ${WAREHOUSE_CONFIG_HOST:-./config.example.json}:/etc/warehouse/config.json:ro
+      - ${OBSERVATIONS_HOST_DIR:-./runtime/observations}:/run/warehouse/observations:ro
     depends_on:
       broker:
         condition: service_healthy
@@ -46,4 +56,6 @@ services:
       start_period: 10s
 volumes:
   broker_data:
+    name: ${WAREHOUSE_VOLUME_PREFIX:-warehouse-netops}_broker_data
   dashboard_data:
+    name: ${WAREHOUSE_VOLUME_PREFIX:-warehouse-netops}_dashboard_data

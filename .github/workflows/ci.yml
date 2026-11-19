@@ -1,0 +1,55 @@
+name: checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  application:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r server/requirements.txt
+      - run: python tools/check_repository.py
+      - run: python -m unittest discover -s tests -v
+        working-directory: server
+      - run: python -m unittest discover -s tools/tests -v
+      - run: python -m unittest discover -s ops/tests -v
+      - run: docker build -t warehouse-ci server
+      - name: Router transaction fault tests
+        run: docker run --rm --network none --user 0:0 --mount type=bind,source="$PWD/router",target=/work/router,readonly -e WAREHOUSE_DISPOSABLE_CONTAINER=1 --entrypoint python warehouse-ci /work/router/tests/test_virtual_router.py -v
+      - name: Cloud generator and transaction tests
+        run: docker run --rm --network none --user 0:0 --mount type=bind,source="$PWD/virtualization",target=/work/virtualization,readonly -e WAREHOUSE_DISPOSABLE_CONTAINER=1 --entrypoint python warehouse-ci /work/virtualization/test_guangzhou_peer.py -v
+      - name: Software integration
+        run: |
+          python tools/lab.py init --demo
+          python tools/lab.py up
+          python tools/check_integration.py
+  windows-tools:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m unittest discover -s virtualization -p 'test_*.py' -v
+      - run: python -m unittest discover -s virtualization/debian -v
+  firmware:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [esp32dev, esp32dev-simulated, esp32dev-wokwi]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install platformio==6.1.18
+      - run: pio run -d firmware -e ${{ matrix.environment }}

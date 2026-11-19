@@ -73,9 +73,11 @@ try:
   except OSError:
    result['self_connect'][str(port)]=False
 """
-    elif purpose == "probes":
+    elif purpose == "probes" or purpose.startswith('probe_'):
+        selected = PORTS if purpose=='probes' else (int(purpose.split('_',1)[1]),)
+        if any(port not in PORTS for port in selected): raise ValueError('Unsupported probe port')
         body = f""" result['ports']={{}}
- for port in (22,1883,8080):
+ for port in {selected!r}:
   s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.settimeout(2)
   row={{'connected':False,'source_ip':None,'errno':None}};start=time.monotonic()
   try:
@@ -88,7 +90,7 @@ try:
   row['elapsed_ms']=round((time.monotonic()-start)*1000,1)
   result['ports'][str(port)]=row
 """
-        if role == "office":
+        if role == "office" and (purpose=='probes' or selected==(8080,)):
             body += """ try:
   opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
   with opener.open('http://192.168.30.10:8080/api/status',timeout=4) as response:
@@ -262,13 +264,15 @@ class MatrixRunner:
                 report["interpretation"] = "Baseline prerequisites are not satisfied; no port-policy conclusion was drawn."
                 return finish_report(report)
             for role in POLICY:
-                probes = self.guest(role, "probes")
-                after = self.router()
-                deny = deny_counter_evidence(before["rules"], after["rules"], role)
-                report.setdefault("counter_evidence", {})[role] = deny
-                if after["fw4_check_exit"] != 0:
-                    add(role + "_fw4_after_probe", "failed", {"exit_code": after["fw4_check_exit"]})
+                http = {}
                 for port, allowed in POLICY[role].items():
+                    before = self.router()
+                    probes = self.guest(role, 'probe_'+str(port))
+                    after = self.router()
+                    deny = deny_counter_evidence(before['rules'],after['rules'],role)
+                    report.setdefault('counter_evidence',{}).setdefault(role,{})[str(port)]=deny
+                    if before['fw4_check_exit'] != 0 or after['fw4_check_exit'] != 0:
+                        add(f'{role}_{port}_fw4_check','failed',{'before':before['fw4_check_exit'],'after':after['fw4_check_exit']})
                     row = probes.get("ports", {}).get(str(port), {})
                     if row.get("source_ip") != ADDRESSES[role] or row.get("errno") in (13, 99, 101, 113):
                         status = "inconclusive"
@@ -281,15 +285,14 @@ class MatrixRunner:
                     else:
                         status = "pass"
                     add(f"{role}_to_service_{port}", status, {"expected_connect": allowed, **row, "deny_counter_verified": deny["verified"] if not allowed else None, "target_listening_verified": listening[str(port)]})
+                    if port==8080: http=probes.get('http',{})
                 if role == "office":
-                    http = probes.get("http", {})
                     data = http.get("data", {})
                     valid = http.get("status") == 200 and data.get("device_id") == "cabinet-01" and data.get("broker_connected") is True and data.get("demo_mode") is True
                     add("office_dashboard_api", "pass" if valid else "failed", http)
                     report["telemetry_freshness"] = {"observed": data.get("data_status"), "required": require_fresh, "origin_not_authenticated_by_this_check": True}
                     if require_fresh:
                         add("office_telemetry_fresh", "pass" if data.get("data_status") == "online" else "failed", report["telemetry_freshness"])
-                before = after
             report["interpretation"] = "TCP rejection is accepted only alongside verified target listeners, correct source interfaces, stable fw4 rules and increased source-zone-reachable deny counters. Authenticated MQTT publication needs separate evidence."
         except Exception as error:
             add("console_evidence_collection", "inconclusive", {"stage": self.collection_stage, "error_type": type(error).__name__, "detail": str(error) if isinstance(error, ProtocolError) else "Console transport or dependency unavailable.", "action": "Inspect the indicated VM console and dependencies; arbitrary console output is not exported."})
