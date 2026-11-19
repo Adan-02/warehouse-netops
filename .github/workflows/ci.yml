@@ -21,6 +21,10 @@ jobs:
         working-directory: server
       - run: python -m unittest discover -s tools/tests -v
       - run: python -m unittest discover -s ops/tests -v
+      - name: Interactive console and graceful shutdown regressions
+        run: |
+          python -m unittest discover -s virtualization -p test_console.py -v
+          python -m unittest discover -s virtualization -p test_control.py -v
       - run: docker build -t warehouse-ci server
       - name: Router transaction fault tests
         run: docker run --rm --network none --user 0:0 --mount type=bind,source="$PWD/router",target=/work/router,readonly -e WAREHOUSE_DISPOSABLE_CONTAINER=1 --entrypoint python warehouse-ci /work/router/tests/test_virtual_router.py -v

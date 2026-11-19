@@ -41,3 +41,5 @@ python virtualization/release.py restore-check --backup <本机备份路径.sqli
 广州的 Webhook 游标及发送队列有独立的一致性备份，见[观测与事件通知](../ops/README.md)。数据库备份不包含 VM 磁盘，也不等同于整台虚拟机快照。
 
 Git 回退、应用回滚和数据恢复是三种不同操作。完整环境重建也不能用覆盖 VMX 或删除 VMware 锁文件代替；运行中的虚拟机与快照差分盘由日常控制工具管理。
+
+冷启动复核使用 `python virtualization/control.py stop` 和 `python virtualization/control.py start --wait --timeout 600`，等待现场与广州业务恢复后再核对版本和历史。默认就绪预算同为 600 秒。若已关机 VM 的标签页仍占用配置，关闭对应标签页后重试，不删除锁文件；具体操作见[虚拟实验日常维护](virtual-lab.md#日常启动与查看)。

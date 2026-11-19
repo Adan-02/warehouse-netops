@@ -4,6 +4,8 @@
 
 办公终端查看温湿度，IoT 设备上传采样，远程网管通过 WireGuard 维护服务。采集、存储和现场看板运行在仓库内部，外网中断时仍能工作。
 
+[![仓库网络与环境监测看板](docs/images/dashboard.jpg)](docs/images/dashboard-full.jpg)
+
 ## 功能
 
 - 办公、IoT、服务三个独立分区，按业务需要放行端口。
@@ -105,6 +107,7 @@ MQTT 主题为 `warehouse/cabinet-01/telemetry`：
 - [ESP32 固件](firmware/README.md)
 - [Wokwi 电路](firmware/WOKWI.md)
 - [验收与故障实验](docs/acceptance.md)
+- [v0.5 验证记录](docs/verification-v0.5.md)
 
 ## 开发
 

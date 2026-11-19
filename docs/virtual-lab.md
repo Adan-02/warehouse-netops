@@ -53,7 +53,7 @@ python 'D:\CodeHomework\warehouse-netops\virtualization\control.py' status
 python 'D:\CodeHomework\warehouse-netops\virtualization\control.py' start --wait
 ```
 
-`start` 只启动尚未运行的本项目 VM，使用 `nogui`。`--wait` 等待现场和广州业务观测就绪，不能用 VM 进程存在代替业务正常。等待就绪后，用普通、非管理员 VMware 打开已运行的 Office 配置：
+`start` 只启动尚未运行的本项目 VM，使用 `nogui`。`--wait` 等待现场和广州业务观测就绪，默认预算为 600 秒，可用 `--timeout 600` 明确指定。单 vCPU/WHP 环境曾观测到约 6 分钟的 service 启动过程；VM 进程存在不能代替业务正常。非正数超时和 `stop --wait` 会在任何 VM 操作前拒绝。等待就绪后，用普通、非管理员 VMware 打开已运行的 Office 配置：
 
 ```text
 C:\Users\32908\Documents\Codex\warehouse-netops-runtime\vms\office\office.vmx
@@ -114,4 +114,4 @@ python 'D:\CodeHomework\warehouse-netops\virtualization\check_wan.py' --output '
 
 主机既有 Hyper-V/WSL、Docker 软件基线与其他虚拟机保持现状。本项目 VM 使用 1 vCPU 作为当前宿主环境的保守配置。服务 VM 应用与数据独立于宿主旧基线，模拟凭据留在私密文件，不进入命令行或演示材料。
 
-避免用管理员 VMware 接管这些 VM。若普通会话遇到配置占用或串口拒绝访问，先结束检查，再正常关闭受影响的实验 VM 及标签页，由启动器重新启动；不要删除运行中 VM 的锁文件或取得所有权。广州仅维护本项目独立接口、规则与端口；美国服务器不执行部署、重启或故障注入。
+避免用管理员 VMware 接管这些 VM。已关机的 VM 仍可能被 VMware 标签页占用，后台启动会返回“文件正在使用中”；确认该 VM 已关机后，关闭对应标签页，再重试 `start --wait`。若遇到串口拒绝访问，先结束检查，按正常关机流程释放受影响的实验 VM 及标签页。不要删除锁文件、取得所有权或结束整个 VMware 进程。广州仅维护本项目独立接口、规则与端口；美国服务器不执行部署、重启或故障注入。
