@@ -29,7 +29,7 @@
 
 拒绝结论同时要求正确源地址、唯一网卡、目标实际监听、稳定 fw4 规则和对应拒绝计数增量，超时本身不算通过。Office 与 IoT 还通过双方实际监听的临时 TCP 9000 验证了双向隔离；独立临时 unit 与端口清理已验证。IoT 身份采集另行核对成功发布与看板序号推进，不能用容器内发布代替跨区路径。
 
-截至 2026-11-19：
+以下为 2026-11-19 的 v0.3 网络基线验收记录；原始报告的时间和版本独立保留：
 
 | 验收 | 结果 | 证据 |
 | --- | --- | --- |
@@ -42,7 +42,7 @@
 | 带广州观测的停 Broker | 至少 25 秒；广州 HTTP 与握手保持、实际 SSH 身份核验通过，Broker 断开且数据过期；本地与广州恢复在线 | `evidence/virtual-broker-stop.json` |
 | 宿主 WAN 直入 | 9 项通过；22/1883/8080 拒绝计数分别增加 3/2/2，临时 /32 路由已删除并复核 | `evidence/virtual-wan-policy.json` |
 
-两种带远程观测的故障均已实际通过，本地版保留为此前的独立记录。2026-11-19 管理员完成最后一项 WAN 直入验收后，单电脑与广州服务器的虚拟阶段验收全部通过；该 WAN 结论限于 VMnet8 宿主经 OpenWrt WAN 的受测路径，不等同于公网来源测试。`evidence/virtual-verification.json` 为 `passed`，六组报告均通过，四台 VM 运行正常，原宿主容器及广州保护基线正常。最新整体状态见 [PROGRESS.md](../PROGRESS.md)。
+两种带远程观测的故障均已实际通过，本地版保留为此前的独立记录。2026-11-19 管理员完成最后一项 WAN 直入验收后，该网络基线验收通过；WAN 结论限于 VMnet8 宿主经 OpenWrt WAN 的受测路径，不等同于公网来源测试。汇总入口 `evidence/virtual-verification.json` 分开保存 `last_acceptance` 与 `live_health`，最新整体状态见 [PROGRESS.md](../PROGRESS.md)。
 
 ## 日常启动与查看
 
@@ -50,16 +50,24 @@
 
 ```powershell
 python 'D:\CodeHomework\warehouse-netops\virtualization\control.py' status
-python 'D:\CodeHomework\warehouse-netops\virtualization\control.py' start
+python 'D:\CodeHomework\warehouse-netops\virtualization\control.py' start --wait
 ```
 
-`start` 只启动尚未运行的本项目 VM，使用 `nogui`。等待就绪后，用普通、非管理员 VMware 打开已运行的 Office 配置：
+`start` 只启动尚未运行的本项目 VM，使用 `nogui`。`--wait` 等待现场和广州业务观测就绪，不能用 VM 进程存在代替业务正常。等待就绪后，用普通、非管理员 VMware 打开已运行的 Office 配置：
 
 ```text
 C:\Users\32908\Documents\Codex\warehouse-netops-runtime\vms\office\office.vmx
 ```
 
-在 Office Firefox 打开 `http://192.168.30.10:8080`。看板标注模拟数据，采样周期 5 秒，20 秒无有效数据会过期。宿主 `http://127.0.0.1:8080` 属于保留的旧软件基线，不用于展示本次分区。
+在 Office Firefox 打开 `http://192.168.30.10:8080`。看板标注模拟数据，采样周期 5 秒，20 秒无有效数据会过期。运维总览区分网络、消息、采样和入库状态；网络快照来自现场与广州的独立只读观测，超过 35 秒显示未知。宿主 `http://127.0.0.1:8080` 属于保留的旧软件基线，不用于展示本次分区。
+
+```powershell
+python 'D:\CodeHomework\warehouse-netops\virtualization\release.py' status
+python 'D:\CodeHomework\warehouse-netops\virtualization\install_observers.py' status
+python 'D:\CodeHomework\warehouse-netops\virtualization\collect_status.py'
+```
+
+`release status` 核对实际镜像和 API 版本；观测器 `status` 检查本项目两侧定时器；总记录将历史验收与当前健康分开。发布、应用回滚和数据库备份分别按[版本发布与回退](versioning.md)执行，不再用预装阶段的源码复制命令更新已隔离的服务机。
 
 实验结束可有序关闭四台实验 VM：
 

@@ -9,6 +9,8 @@ import sqlite3
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -340,6 +342,8 @@ class TransportTests(unittest.TestCase):
             def exec_command(self,value):self.command=value
             def sendall(self,value):self.inputs.append(value)
             def shutdown_write(self):pass
+            @property
+            def eof_received(self):return not self.output and not self.error
             def recv_ready(self):return bool(self.output)
             def recv(self,size):value=self.output[:size];self.output=self.output[size:];return value
             def recv_stderr_ready(self):return bool(self.error)
@@ -369,6 +373,63 @@ class TransportTests(unittest.TestCase):
         client,channel=self.fake_client()
         channel.exec_command=mock.Mock(side_effect=OSError('broken'))
         with self.assertRaises(OSError):transport.exchange(client,'true')
+        self.assertTrue(channel.closed)
+
+    def delayed_client(self,stdout,stderr):
+        """A peer exits before its final data packets and EOF reach Paramiko."""
+        process_exited=threading.Event()
+        channel_lock=threading.Lock()
+        prefix=stdout[:32768]
+        class Channel:
+            def __init__(self):
+                self.output=prefix;self.error=b'';self.eof_received=False;self.closed=False
+            def settimeout(self,value):pass
+            def exec_command(self,value):
+                def remaining_packets():
+                    if not process_exited.wait(2):return
+                    time.sleep(.025)
+                    with channel_lock:
+                        self.output+=stdout[len(prefix):]
+                        self.error+=stderr
+                        self.eof_received=True
+                self.thread=threading.Thread(target=remaining_packets,daemon=True)
+                self.thread.start()
+            def sendall(self,value):pass
+            def shutdown_write(self):pass
+            def recv_ready(self):
+                with channel_lock:return bool(self.output)
+            def recv(self,size):
+                with channel_lock:
+                    value=self.output[:size];self.output=self.output[size:];return value
+            def recv_stderr_ready(self):
+                with channel_lock:return bool(self.error)
+            def recv_stderr(self,size):
+                with channel_lock:
+                    value=self.error[:size];self.error=self.error[size:];return value
+            def exit_status_ready(self):process_exited.set();return True
+            def recv_exit_status(self):return 0
+            def close(self):self.closed=True;self.thread.join(timeout=2)
+        channel=Channel();client=mock.Mock()
+        client.get_transport.return_value.open_session.return_value=channel
+        return client,channel
+
+    def test_early_exit_status_does_not_truncate_later_stdout_or_stderr(self):
+        stdout=b'A'*300000+b'final-stdout'
+        stderr=b'late-stderr-diagnostic'
+        client,channel=self.delayed_client(stdout,stderr)
+        code,tail=transport.exchange(client,'fixed-pure-output',tail_limit=5000000,timeout=3)
+        self.assertEqual(code,0)
+        self.assertEqual(tail,stdout.decode()+'\n'+stderr.decode())
+        self.assertTrue(channel.closed)
+
+    def test_early_exit_status_binary_download_is_complete(self):
+        data=bytes(range(256))*4000+b'final-binary-packet'
+        client,channel=self.delayed_client(data,b'late diagnostic')
+        with tempfile.TemporaryDirectory() as temp:
+            destination=Path(temp)/'binary.backup'
+            code,tail=transport.exchange(client,'fixed-binary-output',output_file=destination,timeout=3)
+            self.assertEqual(code,0);self.assertEqual(destination.read_bytes(),data)
+            self.assertIn('late diagnostic',tail)
         self.assertTrue(channel.closed)
 
 

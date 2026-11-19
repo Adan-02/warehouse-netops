@@ -9,7 +9,7 @@
 在普通 PowerShell 启动已有实验：
 
 ```powershell
-python 'D:\CodeHomework\warehouse-netops\virtualization\control.py' start
+python 'D:\CodeHomework\warehouse-netops\virtualization\control.py' start --wait
 python 'D:\CodeHomework\warehouse-netops\virtualization\control.py' status
 ```
 
@@ -19,7 +19,13 @@ python 'D:\CodeHomework\warehouse-netops\virtualization\control.py' status
 C:\Users\32908\Documents\Codex\warehouse-netops-runtime\vms\office\office.vmx
 ```
 
-Office Firefox 打开 `http://192.168.30.10:8080`，确认模拟标签、温湿度、序号和新鲜状态。宿主 `localhost` 是另一份旧基线。
+Office Firefox 打开 `http://192.168.30.10:8080`，确认模拟标签、温湿度、序号和新鲜状态。运维总览还显示现场 WAN、两侧隧道、广州访问、消息服务和入库。宿主 `localhost` 是另一份旧基线。
+
+用以下命令确认本次展示的运行版本，避免只核对 D 盘源码：
+
+```powershell
+python 'D:\CodeHomework\warehouse-netops\virtualization\release.py' status
+```
 
 提前顺序复测身份、隔离和广州基线：
 
@@ -42,7 +48,7 @@ python 'D:\CodeHomework\warehouse-netops\virtualization\verify_remote.py'
 | Office ↔ IoT | 双向隔离，已用实际监听的 TCP 9000 验证 |
 | 宿主 VMnet8 → OpenWrt WAN → service | TCP 22、1883、8080 均拒绝，临时路由已清理 |
 
-保持 Office 页面可见，指出两次序号增长与温湿度变化，再执行：
+保持 Office 页面可见，指出两次序号增长与温湿度变化。切换 24 小时历史，说明曲线中的空白表示缺测，再展示 CSV 导出。启动标识和去重计数可在同一主机的 `/api/status` 查看。权限复测可执行：
 
 ```powershell
 python 'D:\CodeHomework\warehouse-netops\virtualization\check_matrix.py' --phase baseline --require-fresh --output 'D:\CodeHomework\warehouse-netops\evidence\demo-matrix.json'
@@ -65,10 +71,10 @@ python 'D:\CodeHomework\warehouse-netops\virtualization\verify_remote.py'
 先记录看板序号，执行带广州观测的已验流程：
 
 ```powershell
-python 'D:\CodeHomework\warehouse-netops\virtualization\check_faults.py' --phase wan-disconnect --guangzhou --hold-seconds 27 --output 'D:\CodeHomework\warehouse-netops\evidence\demo-wan.json'
+python 'D:\CodeHomework\warehouse-netops\virtualization\check_faults.py' --phase wan-disconnect --guangzhou --hold-seconds 45 --output 'D:\CodeHomework\warehouse-netops\evidence\demo-wan.json'
 ```
 
-脚本先确认正常基线，再关闭实验 OpenWrt WAN，观察至少 25 秒，最后恢复并验证。Office 页面仍可打开、序号继续增加；广州网页访问失败。恢复后本地采样、WAN、广州 HTTP 和有效握手均需通过。
+脚本先确认正常基线，再关闭实验 OpenWrt WAN，观察 45 秒，最后恢复并验证。Office 页面仍可打开、序号继续增加；广州网页访问失败。现场 WAN 显示异常，广州回送快照超过 35 秒后在本地显示未知。恢复后本地采样、WAN、广州 HTTP 和有效握手均需通过，观测快照等待下一次 10 秒周期更新。
 
 讲解：“采集、存储和现场查看都在仓库内部，外网中断只影响远程管理。”旧握手记录可能仍存在，远程可用性以实际 HTTP 请求为准。
 
@@ -82,13 +88,13 @@ python 'D:\CodeHomework\warehouse-netops\virtualization\check_faults.py' --phase
 python 'D:\CodeHomework\warehouse-netops\virtualization\check_faults.py' --phase broker-stop --guangzhou --hold-seconds 27 --output 'D:\CodeHomework\warehouse-netops\evidence\demo-broker.json'
 ```
 
-观察 Office 与广州页面仍可打开，广州握手正常，SSH 仍实际登录为 `uid 1000 / warehouse / warehouse-service`。同时 Broker 变为断开，最后读数保留，超过 20 秒后数据过期。恢复 Broker 后，发布器重连，本地与广州都恢复新鲜数据。
+观察 Office 与广州页面仍可打开，广州握手正常，SSH 仍实际登录为 `uid 1000 / warehouse / warehouse-service`。同时 Broker 变为断开，最后读数保留，超过 20 秒后数据过期。恢复 Broker 后，发布器重连，本地与广州都恢复新鲜数据。页面下方事件时间线保留消息服务和采样故障的开始、结束与持续时间，恢复后记录不会消失。
 
 讲解：“网页可达不等于采集正常。连接状态和最后有效数据时间分开显示，能缩小故障范围。”同样检查最终 `passed` 与恢复结果。
 
 ## 6:15–7:00，解释证据与后续
 
-只挑关键字段：源地址和端口、拒绝计数增量、故障实际保持时间、序号变化、恢复验证。可先展示 `evidence/virtual-verification.json` 的 `status: passed`，再挑对应报告解释；无需逐行翻日志或解释部署内部结构。
+只挑关键字段：源地址和端口、拒绝计数增量、故障实际保持时间、序号变化、恢复验证。总记录中的 `last_acceptance` 是原版本的历史验收，`live_health` 是本次只读现场观测，两个时间不能混为一谈。无需逐行翻日志或解释部署内部结构。
 
 宿主 WAN 直入已完成 9 项验收：TCP 22、1883、8080 均拒绝，`forward_wan` 拒绝计数分别增加 3、2、2；临时 /32 路由已删除并复核。展示 `evidence/virtual-wan-policy.json` 即可。该结果验证 VMnet8 宿主路径，不等同于公网来源测试。需要独立复测时，在管理员 PowerShell 执行以下命令；它会临时添加并清理自己的精确路由，不必插入演示时间：
 
@@ -102,7 +108,8 @@ python 'D:\CodeHomework\warehouse-netops\virtualization\check_wan.py' --output '
 
 - 先看脚本最后的 `restoration`，不要在另一窗口重跑故障或 `prepare_*`。恢复未验证时保留证据、停止演示。
 - 确认四台 VM 的 `status`、Office 的目标地址，避免误看宿主旧看板。重跑 baseline 可定位不满足的前置条件。
-- 若脚本已结束但恢复仍失败，用本地 VMware 控制台恢复。OpenWrt 执行 `ifup wan`；service 执行 `cd /opt/warehouse-netops/server && sudo docker compose --project-name warehouse-netops start broker`。这些是 Linux 客体命令，不在 Windows PowerShell 执行。随后重新验证基线和广州路径。
+- 若脚本已结束但恢复仍失败，用本地 VMware 控制台恢复。OpenWrt 执行 `ifup wan`；service 执行 `cd /opt/warehouse-netops/current/server && sudo docker compose --env-file /opt/warehouse-netops/shared/server.env --project-name warehouse-netops start broker`。这些是 Linux 客体命令，不在 Windows PowerShell 执行。随后重新验证基线和广州路径。
+- 看板出现“入库异常”时，先检查最后成功入库时间与写入错误，不能把它直接归结为传感器离线。历史或事件暂不可读时，HTTP 存活与实时诊断仍独立显示。
 - 遇到占用或串口拒绝，不删除锁文件、不覆盖 VMX、不接管运行中 VM。结束检查后正常关闭受影响 VM 及标签页，再由启动器启动。
 
 演示结束可保留运行，或有序关闭本项目四台 VM：

@@ -87,7 +87,10 @@ def exchange(client, command, *, input_data=None, input_file=None, output_file=N
                 chunk=channel.recv_stderr(65536)
                 stderr=(stderr+chunk)[-tail_limit:]
                 progress=True
-            if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+            # SSH exit-status is a process result, not a stream terminator.
+            # OpenSSH can send it before the final channel-data packets. Wait
+            # for EOF as well, then drain both buffers before closing.
+            if channel.exit_status_ready() and channel.eof_received and not channel.recv_ready() and not channel.recv_stderr_ready():
                 break
             if not progress: time.sleep(.01)
         code=channel.recv_exit_status()
