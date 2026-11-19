@@ -23,13 +23,20 @@ import tempfile
 import uuid
 
 try:
-    from .runtime import PROJECT,RUNTIME,PRIVATE
+    from .runtime import PROJECT,load_paths
     from .release_transport import ServiceRelay
 except ImportError:
-    from runtime import PROJECT,RUNTIME,PRIVATE
+    from runtime import PROJECT,load_paths
     from release_transport import ServiceRelay
 
-ARTIFACTS=RUNTIME/'releases'
+ARTIFACTS=None  # optional override for offline callers/tests
+PRIVATE=None
+
+def artifact_directory():
+    return ARTIFACTS if ARTIFACTS is not None else load_paths().runtime/'releases'
+
+def private_directory():
+    return PRIVATE if PRIVATE is not None else load_paths().private
 REMOTE='/opt/warehouse-netops'
 MANAGER=REMOTE+'/private/release-manager.py'
 VERSION_RE=re.compile(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.-]+)?')
@@ -164,7 +171,7 @@ def save_image(image,target,image_id=None):
 def build(version):
     if not VERSION_RE.fullmatch(version):raise ValueError('Use a semantic release version such as v0.5.0')
     revision=clean_revision();identity=version+'-'+revision[:12]
-    output=ARTIFACTS/identity
+    output=artifact_directory()/identity
     if output.exists():raise FileExistsError('This immutable release artifact already exists')
     output.mkdir(parents=True,mode=0o700)
     tree=output/'tree';tree.mkdir()
@@ -223,16 +230,14 @@ def manager(relay,action,*args,timeout=180):
 
 
 def read_status(relay):
-    # Running the local status implementation in-memory avoids installing a
-    # manager or creating state merely to inspect a legacy deployment.
-    source=(PROJECT/'virtualization/release_guest.py').read_bytes()
-    encoded=base64.b64encode(source).decode('ascii')
-    script="import base64,json;scope={'__name__':'warehouse_release_status'};exec(base64.b64decode("+repr(encoded)+"),scope);print(json.dumps(scope['status']()))"
-    return json_result(checked(relay,'python3 -c '+shlex.quote(script),timeout=30))
+    # Inspect using a dedicated read-only program. Status never uploads or
+    # executes the full release transaction manager.
+    source=(PROJECT/'virtualization/remote_probes/release_status.py').read_text(encoding='utf-8')
+    return json_result(checked(relay,'python3 -c '+shlex.quote(source),timeout=30))
 
 
 def resolve_artifact(identity):
-    root=ARTIFACTS.resolve()
+    root=artifact_directory().resolve()
     target=(root/identity).resolve()
     if target.parent!=root or not target.is_dir():raise ValueError('Unknown local immutable release artifact')
     manifest=json.loads((target/'build.json').read_text(encoding='utf-8'))
@@ -245,7 +250,7 @@ def copy_backup(relay,snapshot):
     path=snapshot['path']
     if not re.fullmatch(REMOTE+r'/private/backups/[0-9TZ-]+-[0-9a-f]{8}\.sqlite3',path):
         raise RuntimeError('Unexpected private service backup path')
-    directory=PRIVATE/'backups';directory.mkdir(mode=0o700,parents=True,exist_ok=True)
+    directory=private_directory()/'backups';directory.mkdir(mode=0o700,parents=True,exist_ok=True)
     target=directory/Path(path).name
     download_private(relay,path,target,snapshot['sha256'])
     write_private_manifest(target.with_suffix('.json'),snapshot)
@@ -260,7 +265,7 @@ def backup(relay):
         path=private['path']
         if not re.fullmatch(REMOTE+r'/private/backups/[0-9TZ-]+-[0-9a-f]{8}-config\.tar\.gz',path):
             raise RuntimeError('Unexpected private configuration backup path')
-        target=PRIVATE/'backups'/Path(path).name
+        target=private_directory()/'backups'/Path(path).name
         download_private(relay,path,target,private['sha256'],timeout=60)
         private['local_path']=str(target)
     return snapshot
@@ -269,7 +274,7 @@ def backup(relay):
 def preserve_legacy_image(relay,legacy):
     image=legacy['image_id']
     if not re.fullmatch(r'sha256:[0-9a-f]{64}',image):raise RuntimeError('Invalid captured legacy image identity')
-    directory=PRIVATE/'legacy-images';directory.mkdir(mode=0o700,parents=True,exist_ok=True)
+    directory=private_directory()/'legacy-images';directory.mkdir(mode=0o700,parents=True,exist_ok=True)
     target=directory/(image.split(':')[1]+'.tar.gz')
     manifest=target.with_suffix('.json')
     if target.is_symlink() or manifest.is_symlink():raise RuntimeError('Refusing rollback-image symlink')
@@ -335,7 +340,7 @@ def deploy(relay,identity):
         for p in (PROJECT/'server/app').rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix!='.pyc'}
     capture={'captured_at':datetime.now(timezone.utc).isoformat(),'legacy':legacy,'legacy_export':legacy_export,
         'local_app_files':local_files,'source_match_verified':legacy.get('app_files')==local_files}
-    (PRIVATE/'runtime-source-baseline.json').write_text(json.dumps(capture,indent=2),encoding='utf-8')
+    (private_directory()/'runtime-source-baseline.json').write_text(json.dumps(capture,indent=2),encoding='utf-8')
     # Capture and copy the database BEFORE changing the dashboard.
     snapshot=backup(relay)
     upload_id=uuid.uuid4().hex
@@ -357,19 +362,20 @@ def deploy(relay,identity):
         raise RuntimeError('Guangzhou final version verification failed; application rolled back to '+rolled['release_id'])
     report={'published':True,'release_id':identity,'manifest':manifest,'activation':activated,
         'pre_publish_backup':snapshot,'guangzhou_version_verified':True,'us_accessed':False}
-    (PRIVATE/'last-publish.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+    (private_directory()/'last-publish.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
     return report
 
 
-def main():
+def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     sub=parser.add_subparsers(dest='action',required=True)
     p=sub.add_parser('build');p.add_argument('--version',required=True)
     p=sub.add_parser('deploy');p.add_argument('--release-id',required=True)
     sub.add_parser('status');sub.add_parser('rollback');sub.add_parser('backup')
     p=sub.add_parser('restore-check');p.add_argument('--backup',required=True,type=Path)
-    args=parser.parse_args()
-    PRIVATE.mkdir(parents=True,exist_ok=True)
+    args=parser.parse_args(argv)
+    if args.action not in ('status','restore-check'):
+        private_directory().mkdir(parents=True,exist_ok=True)
     if args.action=='build':result=build(args.version)
     elif args.action=='restore-check':result=restore_check(args.backup)
     else:

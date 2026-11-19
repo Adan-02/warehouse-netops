@@ -5,18 +5,18 @@ from pathlib import Path
 import subprocess
 import time
 from console import Console
-from runtime import VMRUN, VMS, vmrun
+from runtime import vmrun, load_paths
 
 ROLES = ('router','service','iot','office')
 
 
 def running():
-    output = subprocess.run([str(VMRUN),'list'],capture_output=True,text=True,check=True).stdout
+    output = subprocess.run([str(load_paths().vmrun),'list'],capture_output=True,text=True,check=True).stdout
     return {str(Path(line.strip()).resolve()).casefold() for line in output.splitlines()[1:] if line.strip()}
 
 
 def is_running(role, active):
-    return str((VMS/role/(role+'.vmx')).resolve()).casefold() in active
+    return str((load_paths().vms/role/(role+'.vmx')).resolve()).casefold() in active
 
 
 def start_guest(role):

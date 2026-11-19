@@ -1,16 +1,39 @@
 """Verify Guangzhou's dedicated VPN, HTTP and pinned key-only SSH path."""
+import argparse
 import base64
 from datetime import datetime, timezone
 import json
 import re
 import shlex
 
-from cloud_connection import connect_guangzhou, audit
-from provision_guests import exec_collect
-from check_matrix import MatrixRunner, encoded_python, extract_json, deny_counter_evidence, network_ready
-from check_faults import http_script, online, recent_handshake
-from console import Console
-from runtime import PROJECT, PRIVATE
+try:
+    from .cloud_connection import connect_guangzhou,audit
+    from .ssh_stream import exec_collect
+    from .lab_session import LabSession
+    from .probes import encoded_python,extract_json,deny_counter_evidence,network_ready,http_script,online,recent_handshake
+    from .console import Console
+    from .runtime import PROJECT
+except ImportError:
+    from cloud_connection import connect_guangzhou,audit
+    from ssh_stream import exec_collect
+    from lab_session import LabSession
+    from probes import encoded_python,extract_json,deny_counter_evidence,network_ready,http_script,online,recent_handshake
+    from console import Console
+    from runtime import PROJECT
+
+# Existing parser tests and local callers can still override these paths. The
+# machine profile itself is loaded only when a command actually needs it.
+PRIVATE=None
+MatrixRunner=LabSession  # compatibility name; no matrix CLI dependency
+
+
+def private_directory():
+    if PRIVATE is not None:return PRIVATE
+    try:
+        from .runtime import load_paths
+    except ImportError:
+        from runtime import load_paths
+    return load_paths().private
 
 STATE = '/var/lib/warehouse-netops-guangzhou/private'
 EXPECTED_ALLOWED_IPS = ['10.89.0.2/32', '192.168.30.10/32']
@@ -24,15 +47,16 @@ def checked(client, command, timeout=30):
 
 
 def expectations():
-    state = json.loads((PRIVATE/'guangzhou-deploy-state.json').read_text(encoding='utf-8'))
+    private=private_directory()
+    state = json.loads((private/'guangzhou-deploy-state.json').read_text(encoding='utf-8'))
     identifier = state.get('bundle_id', '')
     if not re.fullmatch('[0-9a-f]{32}', identifier):
         raise RuntimeError('Saved Guangzhou bundle identity is invalid')
-    bundle = PRIVATE/('guangzhou-bundle-'+identifier)
+    bundle = private/('guangzhou-bundle-'+identifier)
     owner = (bundle/'.project-marker').read_text(encoding='utf-8').strip()
     if owner != 'warehouse-netops-guangzhou-v1:'+identifier:
         raise RuntimeError('Saved Guangzhou ownership marker does not match the bundle')
-    peer = (PRIVATE/'router-wg.pub').read_text(encoding='ascii').strip()
+    peer = (private/'router-wg.pub').read_text(encoding='ascii').strip()
     try:
         raw = base64.b64decode(peer, validate=True)
     except ValueError:
@@ -177,7 +201,11 @@ def ssh_identity_matches(code, output):
     return code == 0 and output.strip().splitlines() == ['1000','warehouse','warehouse-service']
 
 
-def main():
+def main(argv=None):
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--prepare-ssh',action='store_true',
+        help='Explicitly prepare the dedicated maintenance key and COM1 host pin before verification')
+    args=parser.parse_args(argv)
     runner = None
     client = None
     original = None
@@ -185,7 +213,7 @@ def main():
     def add(name, passed, evidence):
         report['checks'].append({'name':name,'status':'pass' if passed else 'failed','evidence':evidence})
     try:
-        original = json.loads((PRIVATE/'guangzhou-before.json').read_text(encoding='utf-8'))
+        original = json.loads((private_directory()/'guangzhou-before.json').read_text(encoding='utf-8'))
         owner, expected_peer = expectations()
         client = connect_guangzhou()
         runner = MatrixRunner(Console)
@@ -230,8 +258,10 @@ print('\\nWH_REMOTE_PORTS_'+json.dumps(r))
         handshake = expected_handshake(path,expected_peer)
         add('independent_wireguard_handshake',recent_handshake(handshake),handshake['wireguard'])
         if all(row['status']=='pass' for row in report['checks']):
-            prepare_ssh(client,runner.console('service'),owner)
-            report['ssh_preparation'] = 'Dedicated key and COM1 host pin persist in project private state; only its public key is authorized on the service VM.'
+            if args.prepare_ssh:
+                prepare_ssh(client,runner.console('service'),owner)
+            report['ssh_preparation'] = ('Explicitly prepared dedicated key and COM1 host pin.' if args.prepare_ssh
+                else 'Read-only verification reused the existing dedicated key and strict host pin; no identity was prepared.')
             command = ('sudo -n ssh -F /dev/null -i '+STATE+'/maintenance_ed25519 -b 10.89.0.1 '
                 '-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes '
                 '-o UserKnownHostsFile='+STATE+'/service_known_hosts -o GlobalKnownHostsFile=/dev/null '

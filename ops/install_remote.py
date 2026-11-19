@@ -12,15 +12,20 @@ import subprocess
 import tempfile
 
 try:
+    from .paths import BASE_DIR, CODE_DIR, OBSERVATIONS_DIR, PRIVATE_DIR, observer_id, unit_role
+except ImportError:  # The root installer is also invoked directly from its bundle.
+    from paths import BASE_DIR, CODE_DIR, OBSERVATIONS_DIR, PRIVATE_DIR, observer_id, unit_role
+
+try:
     import grp
     import pwd
 except ImportError:  # The renderer/tests also run on Windows; installation does not.
     grp=pwd=None
 
 OWNER='warehouse-netops-observer-v1'
-BASE=Path('/var/lib/warehouse-netops-observer')
-PRIVATE=BASE/'private'
-CODE=Path('/opt/warehouse-netops-observer')
+BASE=BASE_DIR
+PRIVATE=PRIVATE_DIR
+CODE=CODE_DIR
 USER='warehouse-observer'
 
 
@@ -112,18 +117,23 @@ def configuration(role,peer,account):
     path=PRIVATE/'config.json'
     if path.is_symlink():raise RuntimeError('Unsafe observer configuration')
     value=json.loads(path.read_text()) if path.exists() else {}
-    value.update({'expected_peer':check_peer(peer),'state_dir':str(PRIVATE)})
-    if role=='site':value['observations_dir']=str(BASE/'observations')
-    else:value.setdefault('webhook',{'enabled':False,'url':'','secret':'','allow_loopback_http_for_tests':False})
+    # Keep the installed location: this is a naming migration, not a move of
+    # private keys, host pins, notification cursor or outbox database.
+    value.update({'expected_peer':check_peer(peer),'private_dir':str(PRIVATE)})
+    if 'state_dir' in value:value['state_dir']=str(PRIVATE)
+    value['observations_dir']=str(OBSERVATIONS_DIR)
+    if observer_id(role)=='guangzhou':
+        value.setdefault('webhook',{'enabled':False,'url':'','secret':'','allow_loopback_http_for_tests':False})
     write(path,json.dumps(value,indent=2)+'\n',0o600,account.pw_uid,account.pw_gid)
 
 
 def unit(role):
-    cloud=role=='cloud'
+    guangzhou=observer_id(role)=='guangzhou'
+    role=unit_role(role)
     code=CODE.as_posix();private=PRIVATE.as_posix();observations=(BASE/'observations').as_posix()
     return f'''[Unit]
-Description=Warehouse {'Guangzhou' if cloud else 'site'} read-only observations
-After=network-online.target{' wg-quick@wg-warehouse.service' if cloud else ''}
+Description=Warehouse {'Guangzhou' if guangzhou else 'site'} read-only observations
+After=network-online.target{' wg-quick@wg-warehouse.service' if guangzhou else ''}
 Wants=network-online.target
 
 [Service]
@@ -137,13 +147,14 @@ TimeoutStartSec=30
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths={private if cloud else observations}
-{'NoNewPrivileges=yes' if not cloud else '# Only the fixed zero-argument cloud-read sudo helper may elevate.'}
+ReadWritePaths={private if guangzhou else observations}
+{'NoNewPrivileges=yes' if not guangzhou else '# Only the fixed zero-argument cloud-read sudo helper may elevate.'}
 UMask=0077
 '''
 
 
 def timer(role):
+    role=unit_role(role)
     return f'''[Unit]
 Description=Refresh warehouse {role} observations every ten seconds
 
@@ -192,11 +203,13 @@ def authorize_reporter(reporter,account):
 
 
 def install(value):
-    role=value.get('role')
-    if role not in ('site','cloud'):raise RuntimeError('Unknown observer installation role')
+    requested_role=value.get('role')
+    try:location=observer_id(requested_role)
+    except ValueError:raise RuntimeError('Unknown observer installation role') from None
+    role=unit_role(location)
     account=setup()
     configuration(role,value['expected_peer'],account)
-    if role=='cloud':
+    if location=='guangzhou':
         public=keypair('reporter_ed25519',account)
         pin('service_known_hosts','192.168.30.10',value['service_host_public_key'],account)
         helper=Path('/usr/local/lib/warehouse-netops-observer/cloud-read')
@@ -216,7 +229,7 @@ def install(value):
     write('/etc/systemd/system/'+name+'.timer',timer(role))
     run('systemctl','daemon-reload')
     # Activation is a separate final step after both SSH keys are installed.
-    return {'role':role,'public_key':public,'timer':name+'.timer','installed':True}
+    return {'role':requested_role,'observer_id':location,'public_key':public,'timer':name+'.timer','installed':True}
 
 
 def main():

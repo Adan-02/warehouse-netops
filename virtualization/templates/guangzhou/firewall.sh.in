@@ -1,0 +1,132 @@
+#!/bin/sh
+# @OWNER@
+set -eu
+umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+if [ "${WAREHOUSE_DISPOSABLE_CONTAINER:-}" = 1 ] && [ -f /.dockerenv ]; then
+    PATH="${WAREHOUSE_TEST_BIN:?}:$PATH"
+fi
+export PATH
+OWNER='@OWNER@'
+STATE=/var/lib/warehouse-netops-guangzhou
+IFACE=wg-warehouse
+CHAIN=WH-WAREHOUSE-IN
+RAW_CHAIN=WH-WAREHOUSE-RAW
+WG_UNIT=wg-quick@wg-warehouse.service
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || die 'Run as root'
+[ ! -L "$STATE" ] && [ -f "$STATE/.owner" ] && [ "$(cat "$STATE/.owner")" = "$OWNER" ] || die 'Missing matching project ownership marker'
+ACTION=${1:-}
+case "$ACTION" in
+    up|reconcile)
+        trap 'result=$?; trap - 0; if [ "$result" -ne 0 ] && systemctl is-active --quiet "$WG_UNIT"; then systemctl stop "$WG_UNIT" || :; fi; exit "$result"' 0 ;;
+esac
+exec 9>/run/warehouse-wg-firewall.lock
+flock -w 15 9 || die 'Project firewall operation is already running'
+
+exists() { iptables -w 10 -t "$1" -S "$2" >/dev/null 2>&1; }
+owned_chain() {
+    table=$1; chain=$2
+    exists "$table" "$chain" || return 0
+    iptables -w 10 -t "$table" -S "$chain" | python3 -c '
+import shlex,sys
+chain,owner=sys.argv[1:]
+seen=False
+for line in sys.stdin:
+    rule=shlex.split(line)
+    seen=True
+    if rule==["-N",chain]: continue
+    if rule[:2]==["-A",chain] and "--comment" in rule and rule[rule.index("--comment")+1]==owner: continue
+    raise SystemExit("Unknown rule in project-named firewall chain")
+if not seen: raise SystemExit("Could not inspect project firewall chain")
+' "$chain" "$OWNER"
+}
+remove_hooks() {
+    table=$1; parent=$2; chain=$3
+    while iptables -w 10 -t "$table" -C "$parent" -m comment --comment "$OWNER" -j "$chain" 2>/dev/null; do
+        iptables -w 10 -t "$table" -D "$parent" -m comment --comment "$OWNER" -j "$chain" || return 1
+    done
+}
+first_hook() {
+    table=$1; parent=$2; chain=$3
+    iptables -w 10 -t "$table" -S "$parent" | python3 -c '
+import shlex,sys
+parent,chain,owner=sys.argv[1:]
+rules=[shlex.split(line) for line in sys.stdin if line.startswith("-A ")]
+expected=["-A",parent,"-m","comment","--comment",owner,"-j",chain]
+raise SystemExit(0 if rules and rules[0]==expected and rules.count(expected)==1 else 1)
+' "$parent" "$chain" "$OWNER"
+}
+ensure_hook() {
+    table=$1; parent=$2; chain=$3
+    if ! first_hook "$table" "$parent" "$chain"; then
+        remove_hooks "$table" "$parent" "$chain" || return 1
+        iptables -w 10 -t "$table" -I "$parent" 1 -m comment --comment "$OWNER" -j "$chain"
+    fi
+}
+filter_correct() {
+    exists filter "$CHAIN" || return 1
+    [ "$(iptables -w 10 -t filter -S "$CHAIN" | grep -c '^-A ' || :)" = 4 ] || return 1
+    iptables -w 10 -t filter -C "$CHAIN" -i "$IFACE" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$OWNER" -j ACCEPT &&
+    iptables -w 10 -t filter -C "$CHAIN" -i "$IFACE" -m comment --comment "$OWNER" -j DROP &&
+    iptables -w 10 -t filter -C "$CHAIN" -i '@WAN_INTERFACE@' -p udp --dport 51830 -m comment --comment "$OWNER" -j ACCEPT &&
+    iptables -w 10 -t filter -C "$CHAIN" -m comment --comment "$OWNER" -j RETURN
+}
+raw_correct() {
+    exists raw "$RAW_CHAIN" || return 1
+    [ "$(iptables -w 10 -t raw -S "$RAW_CHAIN" | grep -c '^-A ' || :)" = 2 ] || return 1
+    iptables -w 10 -t raw -C "$RAW_CHAIN" -i "$IFACE" ! -d 10.89.0.1/32 -m comment --comment "$OWNER" -j DROP &&
+    iptables -w 10 -t raw -C "$RAW_CHAIN" -m comment --comment "$OWNER" -j RETURN
+}
+check() {
+    owned_chain filter "$CHAIN" || return 1
+    owned_chain raw "$RAW_CHAIN" || return 1
+    filter_correct && raw_correct && first_hook filter INPUT "$CHAIN" && first_hook raw PREROUTING "$RAW_CHAIN"
+}
+up() {
+    owned_chain filter "$CHAIN" || return 1
+    owned_chain raw "$RAW_CHAIN" || return 1
+    # Raw INPUT-destination guard prevents transit through existing Docker rules.
+    # No FORWARD/NAT/sysctl/default-route change is made.
+    if ! raw_correct; then
+        if exists raw "$RAW_CHAIN"; then
+            remove_hooks raw PREROUTING "$RAW_CHAIN"
+            iptables -w 10 -t raw -F "$RAW_CHAIN"
+        else iptables -w 10 -t raw -N "$RAW_CHAIN"; fi
+        iptables -w 10 -t raw -A "$RAW_CHAIN" -i "$IFACE" ! -d 10.89.0.1/32 -m comment --comment "$OWNER" -j DROP
+        iptables -w 10 -t raw -A "$RAW_CHAIN" -m comment --comment "$OWNER" -j RETURN
+    fi
+    ensure_hook raw PREROUTING "$RAW_CHAIN"
+    if ! filter_correct; then
+        if exists filter "$CHAIN"; then
+            remove_hooks filter INPUT "$CHAIN"
+            iptables -w 10 -t filter -F "$CHAIN"
+        else iptables -w 10 -t filter -N "$CHAIN"; fi
+        iptables -w 10 -t filter -A "$CHAIN" -i "$IFACE" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$OWNER" -j ACCEPT
+        iptables -w 10 -t filter -A "$CHAIN" -i "$IFACE" -m comment --comment "$OWNER" -j DROP
+        iptables -w 10 -t filter -A "$CHAIN" -i '@WAN_INTERFACE@' -p udp --dport 51830 -m comment --comment "$OWNER" -j ACCEPT
+        iptables -w 10 -t filter -A "$CHAIN" -m comment --comment "$OWNER" -j RETURN
+    fi
+    ensure_hook filter INPUT "$CHAIN"
+    check
+}
+down() {
+    owned_chain filter "$CHAIN"
+    owned_chain raw "$RAW_CHAIN"
+    remove_hooks filter INPUT "$CHAIN"
+    remove_hooks raw PREROUTING "$RAW_CHAIN"
+    for spec in "filter $CHAIN" "raw $RAW_CHAIN"; do
+        set -- $spec
+        if exists "$1" "$2"; then
+            iptables -w 10 -t "$1" -F "$2"
+            iptables -w 10 -t "$1" -X "$2"
+        fi
+    done
+}
+case "${1:-}" in
+    up) up ;;
+    down) down ;;
+    check) check ;;
+    reconcile) if systemctl is-active --quiet "$WG_UNIT"; then up; fi ;;
+    *) die 'Expected up, down, check or reconcile' ;;
+esac

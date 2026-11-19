@@ -19,9 +19,13 @@ import time
 import uuid
 
 try:
-    from .check_matrix import MatrixRunner, PORTS, deny_counter_evidence, network_ready
+    from .lab_session import LabSession
+    from .lab_topology import PORTS
+    from .probes import deny_counter_evidence,network_ready
 except ImportError:
-    from check_matrix import MatrixRunner, PORTS, deny_counter_evidence, network_ready
+    from lab_session import LabSession
+    from lab_topology import PORTS
+    from probes import deny_counter_evidence,network_ready
 
 SOURCE = '192.168.200.254'
 GATEWAY = '192.168.200.50'
@@ -182,7 +186,7 @@ def listeners_ready(inventory):
 
 class WanVerifier:
     def __init__(self, matrix, routes, probe=tcp_probe):
-        self.matrix, self.routes, self.probe = matrix, routes, probe
+        self.session, self.routes, self.probe = matrix, routes, probe
         self.owned = None
 
     def run(self):
@@ -220,10 +224,10 @@ class WanVerifier:
         add('no_existing_destination_route', 'inconclusive' if conflicts else 'pass', {'conflicts': conflicts})
         if conflicts:
             return
-        inventory = self.matrix.guest('service', 'inventory')
+        inventory = self.session.guest('service', 'inventory')
         ready = network_ready('service', inventory) and listeners_ready(inventory)
         add('service_single_nic_and_listeners', 'pass' if ready else 'inconclusive', inventory)
-        before = self.matrix.router()
+        before = self.session.router()
         add('router_fw4_check', 'pass' if before.get('fw4_check_exit') == 0 else 'failed', before)
         if not ready or before.get('fw4_check_exit') != 0:
             return
@@ -241,9 +245,9 @@ class WanVerifier:
         if not valid:
             return
         for port in PORTS:
-            before = self.matrix.router()
+            before = self.session.router()
             row = self.probe(port)
-            after = self.matrix.router()
+            after = self.session.router()
             deny = deny_counter_evidence(before['rules'], after['rules'], 'wan')
             direct = any(item['chain'] == 'forward_wan' and item['delta'] > 0 for item in deny['deltas'])
             host_error = row.get('errno') in (13, 99, 101, 113, 10013, 10049, 10051, 10065) or row.get('winerror') in (10013, 10049, 10051, 10065)
@@ -268,7 +272,7 @@ def main(argv=None, *, matrix=None, routes=None, probe=tcp_probe):
             from .console import Console
         except ImportError:
             from console import Console
-        matrix = MatrixRunner(Console)
+        matrix = LabSession(Console)
     try:
         report = WanVerifier(matrix, routes or WindowsRoutes(), probe).run()
     finally:

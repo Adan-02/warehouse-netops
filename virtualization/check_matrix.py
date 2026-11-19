@@ -8,241 +8,27 @@ read-only HTTP API, not authenticated MQTT publication or physical networking.
 from __future__ import annotations
 
 import argparse
-import base64
 from datetime import datetime, timezone
-import hashlib
 import json
 from pathlib import Path
-import re
 import sys
-import uuid
 
-ADDRESSES = {"office": "192.168.10.100", "iot": "192.168.20.100", "service": "192.168.30.10"}
-GATEWAYS = {"office": "192.168.10.1", "iot": "192.168.20.1", "service": "192.168.30.1"}
-PORTS = (22, 1883, 8080)
-POLICY = {"office": {22: False, 1883: False, 8080: True}, "iot": {22: False, 1883: True, 8080: False}}
-NOT_VERIFIED = ["authenticated MQTT publish from IoT", "WireGuard/Guangzhou", "WAN-disconnect fault", "broker-stop fault", "Office-to-IoT client isolation", "physical Wi-Fi and ESP32"]
-
-
-class ProtocolError(Exception):
-    """A safe diagnostic: never include arbitrary serial output or credentials."""
-
-
-def extract_json(output: str, prefix: str) -> dict:
-    matches = re.findall(r"(?:^|\r?\n)" + re.escape(prefix) + r"([^\r\n]+)", output)
-    if len(matches) != 1:
-        raise ProtocolError("Expected exactly one completed JSON result from the VM.")
-    try:
-        value = json.loads(matches[0])
-    except (ValueError, TypeError):
-        raise ProtocolError("VM JSON result is incomplete or invalid.") from None
-    if not isinstance(value, dict):
-        raise ProtocolError("VM JSON result must be an object.")
-    return value
-
-
-def encoded_python(script: str) -> str:
-    data = base64.b64encode(script.encode("utf-8")).decode("ascii")
-    return 'python3 -c "import base64;exec(base64.b64decode(\'' + data + '\'))"'
-
-
-def guest_script(role: str, purpose: str, prefix: str) -> str:
-    address = ADDRESSES[role]
-    common = f"""import json,subprocess,socket,pathlib,time,urllib.request
-prefix={prefix!r}
-result={{'role':{role!r},'purpose':{purpose!r}}}
 try:
-"""
-    if purpose == "inventory":
-        body = f""" links=json.loads(subprocess.check_output(['ip','-j','-4','addr','show'],text=True))
- nics=[]
- for item in links:
-  name=item['ifname']
-  if pathlib.Path('/sys/class/net/'+name+'/device').exists():
-   nics.append({{'name':name,'addresses':[a['local']+'/'+str(a['prefixlen']) for a in item.get('addr_info',[]) if a.get('family')=='inet'],'up':'UP' in item.get('flags',[])}})
- result['nics']=nics
- result['routes']=json.loads(subprocess.check_output(['ip','-j','-4','route','show'],text=True))
-"""
-        if role == "service":
-            body += """ result['listeners']=[s for s in subprocess.check_output(['ss','-H','-ltn'],text=True).splitlines() if any(s.split()[3].endswith(':'+str(p)) for p in (22,1883,8080))]
- result['self_connect']={}
- for port in (22,1883,8080):
-  try:
-   with socket.create_connection(('192.168.30.10',port),timeout=2,source_address=('192.168.30.10',0)):
-    result['self_connect'][str(port)]=True
-  except OSError:
-   result['self_connect'][str(port)]=False
-"""
-    elif purpose == "probes" or purpose.startswith('probe_'):
-        selected = PORTS if purpose=='probes' else (int(purpose.split('_',1)[1]),)
-        if any(port not in PORTS for port in selected): raise ValueError('Unsupported probe port')
-        body = f""" result['ports']={{}}
- for port in {selected!r}:
-  s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.settimeout(2)
-  row={{'connected':False,'source_ip':None,'errno':None}};start=time.monotonic()
-  try:
-   s.bind(({address!r},0));row['source_ip']=s.getsockname()[0]
-   s.connect(('192.168.30.10',port));row['connected']=True
-  except OSError as exc:
-   row['errno']=exc.errno;row['error_type']=type(exc).__name__
-  finally:
-   s.close()
-  row['elapsed_ms']=round((time.monotonic()-start)*1000,1)
-  result['ports'][str(port)]=row
-"""
-        if role == "office" and (purpose=='probes' or selected==(8080,)):
-            body += """ try:
-  opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
-  with opener.open('http://192.168.30.10:8080/api/status',timeout=4) as response:
-   value=json.load(response)
-   result['http']={'status':response.status,'data':{k:value.get(k) for k in ('device_id','broker_connected','data_status','demo_mode','seq','temperature_c','humidity_pct','age_seconds')}}
- except Exception as exc:
-  result['http']={'error_type':type(exc).__name__}
-"""
-    else:
-        raise ValueError("Unknown guest script purpose")
-    # Interactive bash emits bracketed-paste control bytes before the first
-    # output character. A fresh line keeps the protocol prefix unambiguous.
-    return common + body + "except Exception as exc:\n result['error_type']=type(exc).__name__\nprint('\\n'+prefix+json.dumps(result,separators=(',',':')),flush=True)\n"
+    from .lab_topology import ADDRESSES,GATEWAYS,PORTS,POLICY,NOT_VERIFIED
+    from .probes import (ProtocolError,extract_json,encoded_python,guest_script,
+        extract_nft,rules_from_nft,rules_fingerprint,packet_count,targets,
+        deny_counter_evidence,network_ready)
+    from .lab_session import LabSession
+except ImportError:
+    from lab_topology import ADDRESSES,GATEWAYS,PORTS,POLICY,NOT_VERIFIED
+    from probes import (ProtocolError,extract_json,encoded_python,guest_script,
+        extract_nft,rules_from_nft,rules_fingerprint,packet_count,targets,
+        deny_counter_evidence,network_ready)
+    from lab_session import LabSession
 
 
-def extract_nft(output: str) -> dict:
-    for start in re.finditer(r'\{\s*"nftables"\s*:', output):
-        try:
-            value, _ = json.JSONDecoder().raw_decode(output[start.start():])
-        except ValueError:
-            continue
-        if isinstance(value.get("nftables"), list):
-            return value
-    raise ProtocolError("No complete nftables JSON was returned by the router.")
-
-
-def rules_from_nft(nft: dict) -> list[dict]:
-    rules = []
-    for item in nft["nftables"]:
-        if "rule" in item:
-            rule = item["rule"]
-            if rule.get("family") == "inet" and rule.get("table") == "fw4":
-                rules.append({k: rule.get(k) for k in ("chain", "handle", "comment", "expr")})
-    return rules
-
-
-def rules_fingerprint(rules: list[dict]) -> str:
-    clean = []
-    for rule in rules:
-        clean.append({**rule, "expr": [{"counter": {}} if "counter" in item else item for item in rule.get("expr") or []]})
-    return hashlib.sha256(json.dumps(clean, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-def packet_count(rule: dict) -> int:
-    return sum(item["counter"].get("packets", 0) for item in rule.get("expr") or [] if isinstance(item.get("counter"), dict))
-
-
-def targets(rule: dict) -> list[str]:
-    return [item[action]["target"] for item in rule.get("expr") or [] for action in ("jump", "goto") if isinstance(item.get(action), dict) and "target" in item[action]]
-
-
-def deny_counter_evidence(before: list[dict], after: list[dict], role: str) -> dict:
-    """Only count deny verdicts reachable from this source zone's forward chain."""
-    if rules_fingerprint(before) != rules_fingerprint(after):
-        return {"verified": False, "reason": "rules_changed_during_probe", "deltas": []}
-    chains: dict[str, list[dict]] = {}
-    for rule in after:
-        chains.setdefault(rule["chain"], []).append(rule)
-
-    def only_deny(chain, visited):
-        if chain in visited or chain not in chains:
-            return False
-        outcomes = []
-        for rule in chains[chain]:
-            for item in rule.get("expr") or []:
-                if "accept" in item or "return" in item:
-                    return False
-                if "drop" in item or "reject" in item:
-                    outcomes.append(True)
-                for action in ("jump", "goto"):
-                    if action in item:
-                        outcomes.append(only_deny(item[action].get("target"), visited | {chain}))
-        return bool(outcomes) and all(outcomes)
-
-    reachable = set()
-    pending = ["forward_" + role]
-    while pending:
-        chain = pending.pop()
-        if chain in reachable:
-            continue
-        reachable.add(chain)
-        for rule in chains.get(chain, []):
-            pending.extend(targets(rule))
-    prior = {(item["chain"], item["handle"]): item for item in before}
-    deltas = []
-    for rule in after:
-        if rule["chain"] not in reachable:
-            continue
-        expressions = rule.get("expr") or []
-        deny = any("drop" in item or "reject" in item for item in expressions) or any(only_deny(target, set()) for target in targets(rule))
-        if not deny:
-            continue
-        old = prior[(rule["chain"], rule["handle"])]
-        delta = packet_count(rule) - packet_count(old)
-        if delta < 0:
-            return {"verified": False, "reason": "counter_reset_during_probe", "deltas": []}
-        if delta:
-            deltas.append({"chain": rule["chain"], "handle": rule["handle"], "packets_before": packet_count(old), "packets_after": packet_count(rule), "delta": delta, "comment": rule["comment"], "expr": rule["expr"]})
-    return {"verified": bool(deltas), "reason": "zone_reachable_deny_counter_increased" if deltas else "no_correlated_deny_counter", "deltas": deltas}
-
-
-def network_ready(role: str, inventory: dict) -> bool:
-    nics = inventory.get("nics", [])
-    if len(nics) != 1 or not nics[0].get("up") or nics[0].get("addresses") != [ADDRESSES[role] + "/24"]:
-        return False
-    defaults = [item for item in inventory.get("routes", []) if item.get("dst") == "default"]
-    return len(defaults) == 1 and defaults[0].get("gateway") == GATEWAYS[role] and defaults[0].get("dev") == nics[0]["name"]
-
-
-class MatrixRunner:
-    def __init__(self, console_factory):
-        self.console_factory = console_factory
-        self.consoles = {}
-        self.collection_stage = "not_started"
-
-    def console(self, role):
-        if role not in self.consoles:
-            self.consoles[role] = self.console_factory(role)
-        return self.consoles[role]
-
-    def close(self):
-        for console in self.consoles.values():
-            try:
-                console.close()
-            except Exception:
-                pass
-
-    def guest(self, role, purpose):
-        self.collection_stage = role + "_" + purpose
-        prefix = "WH_MATRIX_" + uuid.uuid4().hex + "_"
-        command = encoded_python(guest_script(role, purpose, prefix))
-        if len(command.encode()) > 3900:
-            raise ProtocolError("Guest command would exceed the conservative serial line limit.")
-        result = self.console(role).command(command, timeout=35)
-        if result["exit_code"] != 0:
-            raise ProtocolError("Guest Python check failed; inspect the VM locally.")
-        data = extract_json(result["output"], prefix)
-        if data.get("error_type"):
-            raise ProtocolError("Guest inventory or probe dependencies are unavailable.")
-        return data
-
-    def router(self):
-        self.collection_stage = "router_fw4_nft"
-        prefix = "WH_FW4_" + uuid.uuid4().hex
-        command = "fw4 check >/dev/null 2>&1; wh_fw_rc=$?; printf '\\n" + prefix + ":%s\\n' \"$wh_fw_rc\"; nft -a -j list table inet fw4"
-        result = self.console("router").command(command, timeout=35)
-        matches = re.findall(r"(?:^|\r?\n)" + re.escape(prefix) + r":(\d+)(?:\r?\n)", result["output"])
-        if result["exit_code"] != 0 or len(matches) != 1:
-            raise ProtocolError("Router did not return complete fw4/nft evidence.")
-        rules = rules_from_nft(extract_nft(result["output"]))
-        return {"fw4_check_exit": int(matches[0]), "fingerprint": rules_fingerprint(rules), "rules": rules}
-
+class MatrixRunner(LabSession):
+    """Access-policy acceptance scenario; transport lives in LabSession."""
     def baseline(self, require_fresh=False):
         report = new_report("baseline")
 

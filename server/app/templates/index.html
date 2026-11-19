@@ -109,7 +109,7 @@
   <section class="toolbar" aria-label="历史时间范围">
     <label for="history-range">历史范围</label>
     <select id="history-range"><option value="10m">最近 10 分钟</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option></select>
-    <button id="export-csv" type="button">导出 CSV</button>
+    <button id="export-csv" type="button" disabled>导出 CSV</button>
     <span class="detail" id="history-note">按接收时间记录 · 缺测处断线</span>
   </section>
   <div class="charts">
@@ -140,6 +140,7 @@ let loading = false;
 let chartGapMs = 20000;
 let lastHistoryFetch = 0;
 let lastOpsFetch = 0;
+let historySelection = null;
 let offlineAfterSeconds = 20;
 const labels = {broker:'消息服务',telemetry:'采样',storage:'入库',wan:'现场 WAN',wireguard:'现场隧道',remote_wireguard:'远程隧道',remote_http:'广州访问'};
 for (const [key,label] of Object.entries(labels)) {
@@ -287,23 +288,37 @@ async function readJson(path) {
   return response.json();
 }
 
-function selectedRange() {
-  const duration={'10m':600000,'24h':86400000,'7d':604800000}[$('history-range').value];
-  const end=new Date();return {start:new Date(end.getTime()-duration).toISOString(),end:end.toISOString()};
+function captureHistorySelection() {
+  const mode=$('history-range').value;
+  const duration={'10m':600000,'24h':86400000,'7d':604800000}[mode];
+  const end=new Date();
+  return Object.freeze({mode,start:new Date(end.getTime()-duration).toISOString(),end:end.toISOString()});
+}
+
+function rangeParameters(selection) {
+  return {start:selection.start,end:selection.end};
 }
 
 async function fetchHistory() {
-  const mode=$('history-range').value;
+  const selection=captureHistorySelection();
+  const mode=selection.mode;
+  const range=rangeParameters(selection);
+  let rows,gapMs,label;
   if (mode==='10m') {
-    const result=await readJson('/api/history?limit=120');historyRows=result.readings;chartGapMs=offlineAfterSeconds*1000;
-    $('temperature-range-label').textContent='最近 120 条有效采样 · °C';
+    const result=await readJson('/api/history?'+new URLSearchParams({...range,limit:'240'}));
+    rows=result.readings;gapMs=offlineAfterSeconds*1000;
+    label='最近 10 分钟 · 原始采样 · °C';
   } else {
-    const range=selectedRange();
     const result=await readJson('/api/history/range?'+new URLSearchParams({...range,resolution:'auto'}));
-    historyRows=(result.buckets || []).map(bucket=>({received_at:bucket.started_at,seq:'—',temperature_c:bucket.temperature_c?.avg ?? null,humidity_pct:bucket.humidity_pct?.avg ?? null}));
-    chartGapMs=(result.resolution_seconds || 60)*1500;
-    $('temperature-range-label').textContent=(mode==='24h'?'最近 24 小时':'最近 7 天')+' · 时间桶均值';
+    rows=(result.buckets || []).map(bucket=>({received_at:bucket.started_at,seq:null,temperature_c:bucket.temperature_c?.avg ?? null,humidity_pct:bucket.humidity_pct?.avg ?? null}));
+    gapMs=(result.resolution_seconds || 60)*1500;
+    label=(mode==='24h'?'最近 24 小时':'最近 7 天')+' · 时间桶均值';
   }
+  // A response for an old selection must not replace a newly selected range.
+  if ($('history-range').value!==mode) return;
+  historyRows=rows;chartGapMs=gapMs;historySelection=selection;
+  $('temperature-range-label').textContent=label;
+  $('export-csv').disabled=false;
   renderRows(historyRows);drawCharts();lastHistoryFetch=Date.now();
 }
 
@@ -318,7 +333,7 @@ function renderRows(rows) {
   }
   for (const item of rows.slice(-10).reverse()) {
     const row = body.insertRow();
-    const values = [localTime(item.received_at), item.seq, displayNumber(item.temperature_c), displayNumber(item.humidity_pct)];
+    const values = [localTime(item.received_at), item.seq ?? '—', displayNumber(item.temperature_c), displayNumber(item.humidity_pct)];
     for (const value of values) row.insertCell().textContent = value;
   }
 }
@@ -351,8 +366,11 @@ async function refresh() {
 }
 
 $('refresh').addEventListener('click', refresh);
-$('history-range').addEventListener('change',()=>{lastHistoryFetch=0;refresh();});
-$('export-csv').addEventListener('click',()=>{window.location.href='/api/history/export.csv?'+new URLSearchParams(selectedRange());});
+$('history-range').addEventListener('change',()=>{historySelection=null;$('export-csv').disabled=true;lastHistoryFetch=0;refresh();});
+$('export-csv').addEventListener('click',()=>{
+  if (historySelection && historySelection.mode===$('history-range').value)
+    window.location.href='/api/history/export.csv?'+new URLSearchParams(rangeParameters(historySelection));
+});
 readJson('/api/version').then(value=>{$('version-info').textContent=`${value.version || '本地版本'} · ${(value.git_commit || '').slice(0,12)}`;}).catch(()=>{$('version-info').textContent='版本信息暂不可读';});
 window.addEventListener('resize', drawCharts);
 refresh();

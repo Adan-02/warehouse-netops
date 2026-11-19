@@ -13,6 +13,12 @@ def probe(role):
         console.close()
 
 
-if __name__ == '__main__':
+def main(argv=None):
+    import argparse
+    argparse.ArgumentParser(description=__doc__).parse_args(argv)
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         print(json.dumps(dict(pool.map(probe, ('office', 'iot', 'service'))), indent=2))
+
+
+if __name__ == '__main__':
+    main()

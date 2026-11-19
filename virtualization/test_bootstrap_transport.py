@@ -12,8 +12,8 @@ MODULE_DIR = str(Path(__file__).resolve().parent)
 if MODULE_DIR not in sys.path:
     sys.path.insert(0, MODULE_DIR)
 
-import bootstrap_router as router
-import provision_guests as guests
+from virtualization.bootstrap import install_router_packages as router
+from virtualization.bootstrap import provision_staging_guests as guests
 
 
 class Channel:
@@ -129,13 +129,14 @@ class FeedsTests(unittest.TestCase):
             if command.startswith('apk update'):
                 return 9, 'package failure'
             return 0, ''
-        with mock.patch.object(router, 'connect', return_value=client), \
+        with mock.patch('virtualization.bootstrap.guards.require_staging'), \
+             mock.patch.object(router, 'connect', return_value=client), \
              mock.patch.object(router.http.server, 'ThreadingHTTPServer', return_value=server), \
              mock.patch.object(router.threading, 'Thread'), \
              mock.patch.object(router, 'exec_collect', side_effect=execute), \
              contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises((RuntimeError, OSError)):
-                router.main()
+                router.main([])
         restores = [command for command in commands if command.startswith('cp -p /root/warehouse-bootstrap-feeds/')]
         self.assertEqual(len(restores), 2)
         self.assertTrue(all('cmp -s' in command for command in restores))

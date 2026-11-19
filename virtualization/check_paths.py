@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-import inspect
 import json
-import math
 from pathlib import Path
 import re
 import shlex
@@ -21,9 +19,19 @@ import zlib
 import base64
 
 try:
-    from .check_matrix import MatrixRunner, ProtocolError, ADDRESSES, deny_counter_evidence, extract_json, network_ready
+    from .lab_session import LabSession
+    from .probes import ProtocolError,deny_counter_evidence,extract_json,network_ready
+    from .lab_topology import ADDRESSES
+    from .remote_probes.iot_identity import public_payload,puback_records
+    from .remote_probes.broker_identity import broker_connections
+    from .transport_limits import command_limit
 except ImportError:
-    from check_matrix import MatrixRunner, ProtocolError, ADDRESSES, deny_counter_evidence, extract_json, network_ready
+    from lab_session import LabSession
+    from probes import ProtocolError,deny_counter_evidence,extract_json,network_ready
+    from lab_topology import ADDRESSES
+    from remote_probes.iot_identity import public_payload,puback_records
+    from remote_probes.broker_identity import broker_connections
+    from transport_limits import command_limit
 
 
 PORT = 9000
@@ -33,94 +41,37 @@ class StopCollection(Exception):
     """A failed prerequisite already has a structured report entry."""
 
 
-def public_payload(value):
-    if not isinstance(value, dict) or value.get("device_id") != "cabinet-01":
-        return None
-    seq, temp, humidity = (value.get(key) for key in ("seq", "temperature_c", "humidity_pct"))
-    if type(seq) is not int or not 1 <= seq <= 2**53 - 1:
-        return None
-    if any(type(item) not in (int, float) or not math.isfinite(item) for item in (temp, humidity)) or not 0 <= humidity <= 100:
-        return None
-    return {"device_id": "cabinet-01", "seq": seq, "temperature_c": temp, "humidity_pct": humidity}
 
 
-def puback_records(records, pid, now):
-    """Keep only current-process, recent, successful, schema-valid JSON samples."""
-    result = []
-    marker = "SIMULATED PUBACK accepted "
-    for record in records:
-        if not isinstance(record, dict) or str(record.get("_PID")) != str(pid) or not pid:
-            continue
-        message = record.get("MESSAGE")
-        if not isinstance(message, str) or not message.startswith(marker):
-            continue
-        try:
-            stamp = int(record["__REALTIME_TIMESTAMP"]) / 1_000_000
-            value = public_payload(json.loads(message[len(marker):]))
-        except (KeyError, ValueError, TypeError):
-            continue
-        if value is not None and 0 <= now - stamp <= 20:
-            result.append({**value, "accepted_epoch": stamp, "age_seconds": round(now - stamp, 3)})
-    return result[-12:]
 
 
-def broker_connections(lines):
-    """Mosquitto notice format; unknown formats yield no authentication claim."""
-    result = []
-    pattern = re.compile(r"New client connected from ([0-9.]+):(\d+) as (warehouse-sim-[A-Za-z0-9_-]{1,80}) \(([^)]*)\)")
-    for line in lines:
-        match = pattern.search(line)
-        if not match:
-            continue
-        address, port, client, meta = match.groups()
-        username = re.search(r"(?:^|,\s*)u'([^']+)'(?:,|$)", meta)
-        if not username or username.group(1) != "cabinet-01" or not 1 <= int(port) <= 65535:
-            continue
-        result.append({"source_ip": address, "source_port": int(port), "client_id": client, "username": "cabinet-01", "notice": "New client connected"})
-    return result[-12:]
 
 
 def compressed_python(script):
     payload = base64.b64encode(zlib.compress(script.encode("utf-8"), level=9)).decode("ascii")
     command = 'python3 -c "import base64,zlib;exec(zlib.decompress(base64.b64decode(\'' + payload + '\')))"'
-    if len(command.encode("utf-8")) > 2900:
+    if len(command.encode("utf-8")) > command_limit('office')-100:
         raise ProtocolError("Path-check command exceeds the conservative serial line limit.")
     return command
 
 
+
+def remote_program(name,parameters):
+    """Read a named source program; data parameters never become shell syntax."""
+    if name not in ('iot_identity','broker_identity'):
+        raise ValueError('Unknown identity probe program')
+    code=(Path(__file__).with_name('remote_probes')/(name+'.py')).read_text(encoding='utf-8')
+    data=json.dumps(parameters,separators=(',',':'))
+    return code+'\nimport json\nr=probe(json.loads('+repr(data)+'))\n'
+
+
 def iot_script():
-    return "import json,math,subprocess,time\n" + inspect.getsource(public_payload) + "\n" + inspect.getsource(puback_records) + "\n" + """r={}
-p=subprocess.run(['systemctl','show','warehouse-sensor-sim','--property=MainPID,ActiveState'],capture_output=True,text=True)
-state=dict(line.split('=',1) for line in p.stdout.splitlines() if '=' in line)
-pid=int(state.get('MainPID','0'));r['main_pid']=pid;r['unit_active']=state.get('ActiveState')=='active'
-try:
- args=open('/proc/'+str(pid)+'/cmdline','rb').read().decode().split('\\0')
- r['source_argument_matches']='--source-ip' in args and args[args.index('--source-ip')+1]=='192.168.20.100'
- r['publisher_script_matches']='/opt/warehouse-netops/tools/publish_sensor.py' in args
-except (OSError,IndexError):
- r['source_argument_matches']=False;r['publisher_script_matches']=False
-p=subprocess.run(['sudo','-n','journalctl','-u','warehouse-sensor-sim','--since=-120s','-n','100','--no-pager','-o','json'],capture_output=True,text=True)
-records=[]
-for line in p.stdout.splitlines():
- try: records.append(json.loads(line))
- except ValueError: pass
-r['journal_exit']=p.returncode;r['pubacks']=puback_records(records,pid,time.time())
-p=subprocess.run(['ss','-H','-tnp'],capture_output=True,text=True);r['mqtt_sockets']=[]
-for line in p.stdout.splitlines():
- fields=line.split()
- if len(fields)<5 or fields[0]!='ESTAB' or ('pid='+str(pid)+',') not in line: continue
- local,peer=fields[3:5]
- if not local.startswith('192.168.20.100:') or peer!='192.168.30.10:1883': continue
- try: port=int(local.rsplit(':',1)[1])
- except ValueError: continue
- r['mqtt_sockets'].append({'source_ip':'192.168.20.100','source_port':port,'peer_ip':'192.168.30.10','peer_port':1883,'main_pid_matches':True})
-"""
+    return remote_program('iot_identity',{'iot_ip':ADDRESSES['iot'],
+        'service_ip':ADDRESSES['service'],'publisher_unit':'warehouse-sensor-sim'})
 
 
 def broker_script():
-    return "import re,subprocess\n" + inspect.getsource(broker_connections) + "\n" + """p=subprocess.run(['sudo','-n','docker','compose','--project-directory','/opt/warehouse-netops/server','--project-name','warehouse-netops','logs','--no-color','--timestamps','--since','1h','--tail','2000','broker'],capture_output=True,text=True,timeout=20)
-r={'command_exit':p.returncode,'connections':broker_connections(p.stdout.splitlines()),'window':'last 1h, at most 2000 lines','unrecognized_notice_count':sum('New client connected from ' in line for line in p.stdout.splitlines())}
-"""
+    return remote_program('broker_identity',{'server_directory':'/opt/warehouse-netops/server'})
 
 
 def office_script():
@@ -192,15 +143,23 @@ def classify_deny(row, source, target_listening, deny):
 
 class PathsRunner:
     def __init__(self, console_factory, *, sleep=time.sleep, progress=None):
-        self.matrix = MatrixRunner(console_factory)
+        self.session = LabSession(console_factory)
         self.sleep = sleep
         self.progress = progress or (lambda message: None)
 
+    @property
+    def matrix(self):
+        """Compatibility for older local harnesses; the dependency is a session."""
+        return self.session
+
+    @matrix.setter
+    def matrix(self,value):self.session=value
+
     def close(self):
-        self.matrix.close()
+        self.session.close()
 
     def command(self, role, command, timeout=30):
-        result = self.matrix.console(role).command(command, timeout=timeout)
+        result = self.session.console(role).command(command, timeout=timeout)
         if result['exit_code']:
             raise ProtocolError(f"{role} diagnostic failed (exit {result['exit_code']}).")
         return result['output']
@@ -231,7 +190,7 @@ class PathsRunner:
     def identity(self):
         report = self.report('identity')
         try:
-            inventory = self.matrix.guest('iot', 'inventory')
+            inventory = self.session.guest('iot', 'inventory')
             ready = network_ready('iot', inventory)
             self.add(report, 'iot_single_nic_and_gateway', 'pass' if ready else 'inconclusive', inventory)
             if not ready:
@@ -264,12 +223,12 @@ class PathsRunner:
         nonce = uuid.uuid4().hex[:12]
         try:
             for role in ('office', 'iot'):
-                inventory = self.matrix.guest(role, 'inventory')
+                inventory = self.session.guest(role, 'inventory')
                 ready = network_ready(role, inventory)
                 self.add(report, role+'_single_nic_and_gateway', 'pass' if ready else 'inconclusive', inventory)
                 if not ready:
                     raise StopCollection()
-            initial = self.matrix.router()
+            initial = self.session.router()
             self.add(report, 'router_fw4_check_before_listeners', 'pass' if initial['fw4_check_exit'] == 0 else 'failed', {'fingerprint': initial['fingerprint']})
             if initial['fw4_check_exit']:
                 raise StopCollection()
@@ -303,9 +262,9 @@ class PathsRunner:
                 if not listening:
                     raise StopCollection()
             for source_role, target_role in (('office','iot'), ('iot','office')):
-                before = self.matrix.router()
+                before = self.session.router()
                 probe = self.guest_json(source_role, socket_script(ADDRESSES[source_role], ADDRESSES[target_role]))
-                after = self.matrix.router()
+                after = self.session.router()
                 target_unit, target_pid = units[target_role]
                 target_state = self.guest_json(target_role, unit_state_script(target_unit, ADDRESSES[target_role]))
                 target_self = self.guest_json(target_role, socket_script(ADDRESSES[target_role], ADDRESSES[target_role]))

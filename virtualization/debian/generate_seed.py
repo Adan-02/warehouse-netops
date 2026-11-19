@@ -14,11 +14,13 @@ import re
 import shlex
 import sys
 
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from virtualization.lab_topology import ADDRESSES, GATEWAYS, STAGING_ADDRESSES, NAT_GATEWAY
 
 ROLES = {
-    "service": {"staging_ip": "192.168.200.60", "final_ip": "192.168.30.10", "gateway": "192.168.30.1"},
-    "iot": {"staging_ip": "192.168.200.61", "final_ip": None, "gateway": "192.168.20.1"},
-    "office": {"staging_ip": "192.168.200.62", "final_ip": None, "gateway": "192.168.10.1"},
+    role: {"staging_ip": STAGING_ADDRESSES[role], "final_ip": ADDRESSES[role] if role=='service' else None, "gateway": GATEWAYS[role]}
+    for role in ('service', 'iot', 'office')
 }
 
 BASE_PACKAGES = [
@@ -71,8 +73,8 @@ def network_config(role: str, mac: str) -> dict:
                 "dhcp4": False,
                 "dhcp6": False,
                 "addresses": [ROLES[role]["staging_ip"] + "/24"],
-                "routes": [{"to": "0.0.0.0/0", "via": "192.168.200.1"}],
-                "nameservers": {"addresses": ["192.168.200.1"]},
+                "routes": [{"to": "0.0.0.0/0", "via": NAT_GATEWAY}],
+                "nameservers": {"addresses": [NAT_GATEWAY]},
             }
         },
     }
@@ -86,7 +88,7 @@ def networkd_config(role: str, mac: str, mode: str) -> str:
     ]
     address = ROLES[role]["staging_ip"] if mode == "staging" else ROLES[role]["final_ip"]
     if address:
-        gateway = "192.168.200.1" if mode == "staging" else ROLES[role]["gateway"]
+        gateway = NAT_GATEWAY if mode == "staging" else ROLES[role]["gateway"]
         lines.extend(["DHCP=no", f"Address={address}/24", f"Gateway={gateway}", f"DNS={gateway}"])
     else:
         lines.extend(["DHCP=ipv4", "", "[DHCPv4]", "UseDNS=yes", "UseRoutes=yes"])
@@ -127,14 +129,14 @@ if [ -d /etc/network ]; then
 fi
 if systemctl cat networking.service >/dev/null 2>&1; then systemctl disable networking.service; fi
 systemctl enable systemd-networkd.service systemd-networkd-wait-online.service systemd-resolved.service
-if [ "$mode" = staging ]; then dns=192.168.200.1; else dns=@@FINAL_DNS@@; fi
+if [ "$mode" = staging ]; then dns=@@STAGING_DNS@@; else dns=@@FINAL_DNS@@; fi
 printf '[Resolve]\nDNS=%s\nFallbackDNS=\n' "$dns" > /etc/systemd/resolved.conf.d/warehouse-lab.conf
 ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 printf '{"role":"@@ROLE@@","mode":"%s","state":"prepared_for_next_boot","mac":"@@MAC@@"}\n' "$mode" > /var/lib/warehouse/network-pending.json
 echo "Prepared $mode network for the next boot. Live interface was not restarted."
 echo 'Power off the VM, change its ONLY NIC to the selected LAN Segment/NAT, then boot.'
 if [ "${2:-}" = --poweroff ]; then systemctl poweroff; fi
-""".replace("@@ROLE@@", role).replace("@@MAC@@", mac).replace("@@FINAL_DNS@@", str(ROLES[role]["gateway"]))
+""".replace("@@ROLE@@", role).replace("@@MAC@@", mac).replace("@@FINAL_DNS@@", str(ROLES[role]["gateway"])).replace("@@STAGING_DNS@@", NAT_GATEWAY)
 
 
 def bootstrap_script(role: str) -> str:
@@ -218,7 +220,7 @@ def cloud_config(role: str, mac: str, public_key: str) -> dict:
     files = [
         {"path": "/etc/warehouse-guest.json", "permissions": "0644", "content": json.dumps({"role": role, "mac": mac, "lab": "warehouse-netops"}) + "\n"},
         {"path": "/etc/ssh/sshd_config.d/10-warehouse-lab.conf", "permissions": "0644", "content": "PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\nAllowUsers warehouse\n"},
-        {"path": "/etc/systemd/resolved.conf.d/warehouse-lab.conf", "permissions": "0644", "content": "[Resolve]\nDNS=192.168.200.1\nFallbackDNS=\n"},
+        {"path": "/etc/systemd/resolved.conf.d/warehouse-lab.conf", "permissions": "0644", "content": f"[Resolve]\nDNS={NAT_GATEWAY}\nFallbackDNS=\n"},
         {"path": "/etc/systemd/system/serial-getty@ttyS0.service.d/warehouse-autologin.conf", "permissions": "0644", "content": "[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin warehouse --noclear --keep-baud 115200,38400,9600 %I $TERM\n"},
         {"path": "/etc/default/grub.d/99-warehouse-serial.cfg", "permissions": "0644", "content": 'case " ${GRUB_CMDLINE_LINUX:-} " in\n  *" console=ttyS0,"*) ;;\n  *) GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:-} console=ttyS0,115200n8" ;;\nesac\n'},
         {"path": "/usr/local/sbin/warehouse-bootstrap", "permissions": "0755", "content": bootstrap_script(role)},

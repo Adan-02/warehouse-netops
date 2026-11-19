@@ -13,191 +13,53 @@ import json
 from pathlib import Path
 import sys
 import time
-import uuid
 
 try:
-    from .check_matrix import MatrixRunner, ProtocolError, encoded_python, extract_json
+    from .check_matrix import MatrixRunner
+    from .lab_session import LabSession
+    from .probes import (ProtocolError,encoded_python,extract_json,online,
+        web_alive,recent_handshake,ssh_probe_script,ssh_identity_verified)
+    from . import probes as _probes
+    from .lab_topology import OFFICE_IP,CLOUD_IP,SERVICE_IP,SERVICE_PORT,STACK,PUBLIC_FIELDS
 except ImportError:
-    from check_matrix import MatrixRunner, ProtocolError, encoded_python, extract_json
+    from check_matrix import MatrixRunner
+    from lab_session import LabSession
+    from probes import (ProtocolError,encoded_python,extract_json,online,
+        web_alive,recent_handshake,ssh_probe_script,ssh_identity_verified)
+    import probes as _probes
+    from lab_topology import OFFICE_IP,CLOUD_IP,SERVICE_IP,SERVICE_PORT,STACK,PUBLIC_FIELDS
 
 
-OFFICE_IP = "192.168.10.100"
-CLOUD_IP = "10.89.0.1"
-SERVICE_IP = "192.168.30.10"
-SERVICE_PORT = 8080
-STACK = "cd /opt/warehouse-netops/server && sudo -n docker compose --project-name warehouse-netops "
-PUBLIC_FIELDS = (
-    "device_id", "broker_connected", "data_status", "demo_mode", "seq",
-    "temperature_c", "humidity_pct", "age_seconds", "offline_after_seconds", "last_seen_at",
-)
-
-
-def http_script(prefix, source_ip, handshake=False):
-    """Use a freshly bound TCP socket, bypassing all environment proxy settings."""
-    script = f"""import http.client,socket,json,time,subprocess
-r={{'source_ip':None,'connected':False,'status':None}}
-s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.settimeout(4)
-try:
- s.bind(({source_ip!r},0));r['source_ip']=s.getsockname()[0]
- s.connect(({SERVICE_IP!r},{SERVICE_PORT}));r['connected']=True
- c=http.client.HTTPConnection({SERVICE_IP!r},{SERVICE_PORT},timeout=4);c.sock=s
- c.request('GET','/api/status',headers={{'Connection':'close'}})
- response=c.getresponse();r['status']=response.status
- value=json.loads(response.read(16384))
- r['data']={{k:value.get(k) for k in {PUBLIC_FIELDS!r}}}
- c.close()
-except Exception as e:
- r['error_type']=type(e).__name__
-finally:
- s.close()
-"""
-    if handshake:
-        script += """try:
- p=subprocess.run(['sudo','-n','/usr/bin/wg','show','wg-warehouse','latest-handshakes'],capture_output=True,text=True,timeout=4)
- values=[int(line.split()[-1]) for line in p.stdout.splitlines() if len(line.split())==2]
- r['wireguard']={'command_exit':p.returncode,'latest_handshake':max(values,default=0),'observed_at':time.time()}
-except Exception as e:
- r['wireguard']={'error_type':type(e).__name__}
-"""
-    return script + f"print('\\n'+{prefix!r}+json.dumps(r,separators=(',',':')),flush=True)\n"
-
-
-def online(sample, source_ip=OFFICE_IP):
-    value = sample.get("data", {})
-    return (
-        sample.get("source_ip") == source_ip and sample.get("connected") is True
-        and sample.get("status") == 200 and value.get("device_id") == "cabinet-01"
-        and value.get("broker_connected") is True and value.get("data_status") == "online"
-        and value.get("demo_mode") is True and type(value.get("seq")) is int
-        and value["seq"] > 0 and value.get("offline_after_seconds") == 20
-    )
-
-
-def web_alive(sample, source_ip=OFFICE_IP):
-    return sample.get("source_ip") == source_ip and sample.get("connected") is True and sample.get("status") == 200
-
-
-def recent_handshake(sample):
-    value = sample.get("wireguard", {})
-    stamp = value.get("latest_handshake", 0)
-    now = value.get("observed_at", 0)
-    return value.get("command_exit") == 0 and isinstance(stamp, (int, float)) and stamp > 0 and 0 <= now - stamp <= 180
-
-
-def ssh_probe_script(prefix):
-    """Read-only reuse of verify_remote's prepared key and COM1 host pin."""
-    return f"""import json,os,re,stat,subprocess
-from pathlib import Path
-r={{'source_ip':'10.89.0.1','target_ip':'192.168.30.10','exit_code':None,'identity_matches':False,'private_paths_guarded':False,'authentication':'publickey','host_key_policy':'strict project pin'}}
-try:
- root=Path('/var/lib/warehouse-netops-guangzhou');private=root/'private'
- def guard(path,directory=False):
-  info=path.lstat();kind=stat.S_ISDIR if directory else stat.S_ISREG
-  if not kind(info.st_mode) or info.st_uid!=0 or stat.S_IMODE(info.st_mode)!=(0o700 if directory else 0o600):
-   raise RuntimeError('Unsafe existing project private path')
- for path in (root,private):guard(path,True)
- for path in (root/'.owner',private/'maintenance_ed25519',private/'service_known_hosts'):guard(path)
- if not re.fullmatch('warehouse-netops-guangzhou-v1:[0-9a-f]{{32}}', (root/'.owner').read_text().strip()):
-  raise RuntimeError('Existing project ownership marker invalid')
- r['private_paths_guarded']=True
- args=['ssh','-F','/dev/null','-i',str(private/'maintenance_ed25519'),'-b','10.89.0.1',
-  '-o','BatchMode=yes','-o','ConnectTimeout=5','-o','ConnectionAttempts=1','-o','StrictHostKeyChecking=yes',
-  '-o','UserKnownHostsFile='+str(private/'service_known_hosts'),'-o','GlobalKnownHostsFile=/dev/null',
-  '-o','IdentityAgent=none','-o','IdentitiesOnly=yes','-o','PreferredAuthentications=publickey',
-  '-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no','-o','HostKeyAlgorithms=ssh-ed25519',
-  'warehouse@192.168.30.10','id -u; id -un; hostname']
- p=subprocess.run(args,capture_output=True,text=True,timeout=12)
- r['exit_code']=p.returncode
- r['identity_matches']=p.returncode==0 and p.stdout.strip().splitlines()==['1000','warehouse','warehouse-service']
- if r['identity_matches']:r['identity']={{'uid':1000,'user':'warehouse','hostname':'warehouse-service'}}
-except Exception as e:
- r['error_type']=type(e).__name__
-print('\\n'+{prefix!r}+json.dumps(r,separators=(',',':')),flush=True)
-"""
-
-
-def ssh_identity_verified(sample):
-    return (sample.get('source_ip') == CLOUD_IP and sample.get('target_ip') == SERVICE_IP
-            and sample.get('private_paths_guarded') is True and sample.get('exit_code') == 0
-            and sample.get('identity_matches') is True
-            and sample.get('identity') == {'uid':1000,'user':'warehouse','hostname':'warehouse-service'}
-            and sample.get('authentication') == 'publickey' and sample.get('host_key_policy') == 'strict project pin')
+def http_script(prefix,source_ip,handshake=False):
+    """Compatibility wrapper retaining the existing test override points."""
+    return _probes.http_script(prefix,source_ip,handshake,service_ip=SERVICE_IP,service_port=SERVICE_PORT)
 
 
 class FaultRunner:
     def __init__(self, console_factory, *, cloud_factory=None, sleep=time.sleep,
                  monotonic=time.monotonic, progress=None):
-        self.matrix = MatrixRunner(console_factory)
-        self.cloud_factory = cloud_factory
-        self.cloud_client = None
-        self.sleep = sleep
-        self.monotonic = monotonic
-        self.progress = progress or (lambda message: None)
+        self.session=LabSession(console_factory,cloud_factory=cloud_factory)
+        self.matrix=self.session  # compatibility for existing scenario fakes
+        self.cloud_factory=cloud_factory
+        self.sleep=sleep
+        self.monotonic=monotonic
+        self.progress=progress or (lambda message:None)
 
-    def close(self):
-        self.matrix.close()
-        if self.cloud_client is not None:
-            self.cloud_client.close()
+    def close(self):self.session.close()
 
-    def command(self, role, command, timeout=45):
-        result = self.matrix.console(role).command(command, timeout=timeout)
-        if result["exit_code"] != 0:
-            # Do not export arbitrary serial output or private file contents.
-            raise ProtocolError(f"{role} command failed (exit {result['exit_code']}).")
-        return result["output"]
+    def command(self,role,command,timeout=45):
+        return self.session.command(role,command,timeout)
 
     def baseline(self):
-        return self.matrix.baseline(require_fresh=True)
+        return MatrixRunner.baseline(self.session,require_fresh=True)
 
-    def local_probe(self):
-        prefix = "WH_FAULT_" + uuid.uuid4().hex + "_"
-        command = encoded_python(http_script(prefix, OFFICE_IP))
-        if len(command.encode("utf-8")) > 2900:
-            raise ProtocolError("Fault HTTP probe exceeds the serial command limit.")
-        return extract_json(self.command("office", command, timeout=15), prefix)
+    def local_probe(self):return self.session.local_probe()
 
-    def cloud_probe(self):
-        if self.cloud_factory is None:
-            raise ProtocolError("Guangzhou checking was not enabled.")
-        if self.cloud_client is None:
-            self.cloud_client = self.cloud_factory()
-        prefix = "WH_CLOUD_" + uuid.uuid4().hex + "_"
-        command = encoded_python(http_script(prefix, CLOUD_IP, handshake=True))
-        _, output, _ = self.cloud_client.exec_command(command, timeout=15)
-        output.channel.set_combine_stderr(True)
-        payload = output.read(16385)
-        if len(payload) > 16384 or output.channel.recv_exit_status() != 0:
-            raise ProtocolError("Guangzhou read-only HTTP/WireGuard probe failed.")
-        return extract_json(payload.decode("utf-8", errors="replace"), prefix)
+    def cloud_probe(self):return self.session.cloud_probe()
 
-    def cloud_ssh_probe(self):
-        # Called only for broker-stop cloud checks. WAN checks have no
-        # dependency on this private key, host pin or service SSH account.
-        if self.cloud_factory is None:
-            raise ProtocolError('Guangzhou checking was not enabled.')
-        if self.cloud_client is None:
-            self.cloud_client = self.cloud_factory()
-        prefix = 'WH_CLOUD_SSH_' + uuid.uuid4().hex + '_'
-        command = 'sudo -n ' + encoded_python(ssh_probe_script(prefix))
-        _, output, _ = self.cloud_client.exec_command(command, timeout=20)
-        output.channel.set_combine_stderr(True)
-        payload = output.read(16385)
-        if len(payload) > 16384 or output.channel.recv_exit_status() != 0:
-            raise ProtocolError('Guangzhou dedicated-key SSH probe failed.')
-        return extract_json(payload.decode('utf-8', errors='replace'), prefix)
+    def cloud_ssh_probe(self):return self.session.cloud_ssh_probe()
 
-    def wan_state(self):
-        output = self.command("router", "ubus call network.interface.wan status", timeout=15)
-        for start, char in enumerate(output):
-            if char != "{":
-                continue
-            try:
-                value, _ = json.JSONDecoder().raw_decode(output[start:])
-            except ValueError:
-                continue
-            if isinstance(value, dict) and isinstance(value.get("up"), bool):
-                return {"up": value["up"], "pending": value.get("pending"), "available": value.get("available")}
-        raise ProtocolError("Router did not return a complete WAN state.")
+    def wan_state(self):return self.session.wan_state()
 
     def run(self, phase, *, hold_seconds=27, recovery_seconds=90):
         if phase not in ("broker-stop", "wan-disconnect"):

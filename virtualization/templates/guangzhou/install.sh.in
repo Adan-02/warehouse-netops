@@ -1,0 +1,216 @@
+#!/bin/sh
+# @OWNER@
+set -eu
+umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+if [ "${WAREHOUSE_DISPOSABLE_CONTAINER:-}" = 1 ] && [ -f /.dockerenv ]; then
+    PATH="${WAREHOUSE_TEST_BIN:?}:$PATH"
+fi
+export PATH
+OWNER='@OWNER@'
+STATE=/var/lib/warehouse-netops-guangzhou
+PRIVATE=$STATE/private
+LIB=/usr/local/lib/warehouse-netops-guangzhou
+IFACE=wg-warehouse
+FW=warehouse-wg-firewall.service
+WG=wg-quick@wg-warehouse.service
+TIMER=warehouse-wg-reconcile.timer
+RECONCILE=warehouse-wg-reconcile.service
+DROPIN=/etc/systemd/system/wg-quick@wg-warehouse.service.d
+LOCK=/run/warehouse-netops-guangzhou.lock
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+owns_file() { [ -f "$1" ] && [ ! -L "$1" ] && head -n 2 "$1" | grep -Fqx "# $OWNER"; }
+owned_state() { [ -d "$STATE" ] && [ ! -L "$STATE" ] && [ -f "$STATE/.owner" ] && [ "$(cat "$STATE/.owner")" = "$OWNER" ]; }
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+[ "$#" = 3 ] && [ "$2" = --project-dir ] || die 'Usage: install.sh check|install|status|rollback --project-dir ABSOLUTE_BUNDLE_DIRECTORY'
+ACTION=$1
+[ "$(readlink -f "$3")" = "$SCRIPT_DIR" ] || die 'Explicit project directory must be this bundle directory'
+[ -f "$SCRIPT_DIR/.project-marker" ] && [ "$(cat "$SCRIPT_DIR/.project-marker")" = "$OWNER" ] || die 'Missing explicit bundle marker'
+[ "$(id -u)" = 0 ] || die 'Run as root'
+bundle_mode=$(stat -c '%a' "$SCRIPT_DIR")
+key_mode=$(stat -c '%a' "$SCRIPT_DIR/wg-warehouse.conf")
+[ "$((0$bundle_mode & 077))" = 0 ] && [ "$((0$key_mode & 077))" = 0 ] || die 'Uploaded bundle directory and private configuration must deny group/other access'
+. /etc/os-release
+[ "$ID" = debian ] && [ "$VERSION_ID" = 13 ] || die 'This bundle requires Debian 13'
+for cmd in iptables iptables-save ip ss wg wg-quick systemctl python3 sha256sum install flock; do
+    command -v "$cmd" >/dev/null 2>&1 || die "Missing prerequisite: $cmd"
+done
+(cd "$SCRIPT_DIR" && sha256sum -c --status checksums.txt) || die 'Bundle checksum verification failed'
+
+resource_files() {
+    printf '%s\n' "$PRIVATE/wg-warehouse.conf" "$LIB/firewall.sh" \
+        "/etc/systemd/system/$FW" "/etc/systemd/system/$TIMER" \
+        "/etc/systemd/system/$RECONCILE" "$DROPIN/warehouse.conf"
+}
+preflight() {
+    OWNED=0; owned_state && OWNED=1
+    iptables -w 10 -t filter -S INPUT >/dev/null || die 'Cannot inspect the existing INPUT rules'
+    iptables -w 10 -t raw -S PREROUTING >/dev/null || die 'Cannot inspect the existing raw table'
+    if [ -e "$STATE" ] && [ "$OWNED" = 0 ]; then die 'Unknown project state directory already exists'; fi
+    for path in "$PRIVATE" "$LIB" "$DROPIN"; do [ ! -L "$path" ] || die 'A project directory is a symlink'; done
+    if [ -d "$LIB" ] && { [ ! -f "$LIB/.owner" ] || [ "$(cat "$LIB/.owner")" != "$OWNER" ]; }; then die 'Unknown runtime directory already exists'; fi
+    resource_files | while IFS= read -r path; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            [ "$OWNED" = 1 ] && owns_file "$path" || die "Unknown resource already exists: $path"
+            cmp -s "$path" "$SCRIPT_DIR/${path##*/}" || die 'Existing project files differ from this bundle; retain the original bundle and roll back before replacement'
+        fi
+    done
+    if [ -d "$DROPIN" ]; then
+        for path in "$DROPIN"/*; do
+            [ -e "$path" ] || continue
+            [ "$path" = "$DROPIN/warehouse.conf" ] && owns_file "$path" || die 'Unknown WireGuard instance drop-in exists'
+        done
+    fi
+    for unit in "$FW" "$TIMER" "$RECONCILE"; do
+        fragment=$(systemctl show -p FragmentPath --value "$unit" 2>/dev/null || :)
+        if [ -n "$fragment" ]; then
+            [ "$OWNED" = 1 ] && [ "$fragment" = "/etc/systemd/system/$unit" ] && owns_file "$fragment" || die 'An unknown loaded unit uses a project service name'
+        fi
+    done
+    fragment=$(systemctl show -p FragmentPath --value "$WG" 2>/dev/null || :)
+    case "$fragment" in ''|/lib/systemd/system/wg-quick@.service|/usr/lib/systemd/system/wg-quick@.service) ;; *) die 'An unknown dedicated unit overrides the project WireGuard instance' ;; esac
+    if [ "$OWNED" = 0 ] && { systemctl is-active --quiet "$WG" || systemctl is-enabled --quiet "$WG"; }; then
+        die 'An unowned WireGuard instance is active or enabled'
+    fi
+    [ ! -e /etc/wireguard/wg-warehouse.conf ] && [ ! -L /etc/wireguard/wg-warehouse.conf ] || die 'An unknown standard WireGuard configuration uses this interface name'
+    ip link show dev '@WAN_INTERFACE@' >/dev/null 2>&1 || die 'Expected WAN interface is missing'
+    if ip link show dev "$IFACE" >/dev/null 2>&1; then
+        [ "$OWNED" = 1 ] && owns_file "$PRIVATE/wg-warehouse.conf" || die 'Unknown interface already exists'
+        [ "$(wg show "$IFACE" listen-port)" = 51830 ] || die 'Existing project interface has an unexpected port'
+    fi
+    for spec in 'filter WH-WAREHOUSE-IN' 'raw WH-WAREHOUSE-RAW'; do
+        set -- $spec
+        if iptables -w 10 -t "$1" -S "$2" >/dev/null 2>&1; then
+            [ "$OWNED" = 1 ] || die 'Unknown project-named firewall chain exists'
+            iptables -w 10 -t "$1" -S "$2" | python3 -c '
+import shlex,sys
+chain,owner=sys.argv[1:]
+for line in sys.stdin:
+    rule=shlex.split(line)
+    if rule==["-N",chain]: continue
+    if rule[:2]==["-A",chain] and "--comment" in rule and rule[rule.index("--comment")+1]==owner: continue
+    raise SystemExit("Unknown rule in project-named firewall chain")
+' "$2" "$OWNER"
+        fi
+    done
+    listeners=$(ss -H -lun) || die 'Cannot inspect UDP listeners'
+    if printf '%s\n' "$listeners" | grep -Eq '(^|[[:space:]])[^[:space:]]*:51830([[:space:]]|$)'; then
+        [ "$OWNED" = 1 ] && [ "$(wg show "$IFACE" listen-port 2>/dev/null)" = 51830 ] || die 'UDP 51830 is already occupied'
+    fi
+    python3 - "$OWNED" <<'PY'
+import ipaddress,json,subprocess,sys
+owned=sys.argv[1]=='1'
+reserved=ipaddress.ip_network('10.89.0.0/24')
+service=ipaddress.ip_network('192.168.30.10/32')
+expected={'10.89.0.1/32','10.89.0.2/32','192.168.30.10/32'}
+routes=json.loads(subprocess.check_output(['ip','-j','-4','route','show','table','all']))
+for route in routes:
+    dst=route.get('dst','default')
+    if dst=='default': continue
+    network=ipaddress.ip_network(dst,strict=False)
+    if not (network.overlaps(reserved) or network.overlaps(service)): continue
+    if owned and route.get('dev')=='wg-warehouse' and str(network) in expected: continue
+    raise SystemExit('Conflicting existing route overlaps a project network')
+addresses=json.loads(subprocess.check_output(['ip','-j','-4','addr','show']))
+for interface in addresses:
+    for addr in interface.get('addr_info',[]):
+        network=ipaddress.ip_network(str(addr['local'])+'/'+str(addr['prefixlen']),strict=False)
+        if not (network.overlaps(reserved) or network.overlaps(service)): continue
+        if owned and interface.get('ifname')=='wg-warehouse' and addr['local']=='10.89.0.1' and addr['prefixlen']==32: continue
+        raise SystemExit('Conflicting existing address overlaps a project network')
+PY
+    systemctl is-active --quiet qq-stack-firewall.service || die 'Existing QQ firewall service must already be active; do not start or reconfigure it here'
+    printf 'Project preflight passed. No server changes made by check.\n'
+}
+
+remove_owned_file() {
+    if [ -e "$1" ] || [ -L "$1" ]; then
+        owns_file "$1" || { printf 'ERROR: Refusing to remove unowned file %s\n' "$1" >&2; return 1; }
+        rm -f -- "$1"
+    fi
+}
+cleanup() {
+    owned_state || { printf 'ERROR: No matching installation ownership marker\n' >&2; return 1; }
+    failed=0
+    for unit in "$TIMER" "$RECONCILE" "$WG"; do
+        if [ -f "/etc/systemd/system/$unit" ] || { [ "$unit" = "$WG" ] && [ -f "$DROPIN/warehouse.conf" ]; }; then
+            systemctl stop "$unit" || failed=1
+        fi
+    done
+    if ip link show dev "$IFACE" >/dev/null 2>&1; then
+        printf 'ERROR: Project interface remains up; retaining its firewall and private files for recovery.\n' >&2
+        return 1
+    fi
+    if [ -f "/etc/systemd/system/$FW" ]; then systemctl stop "$FW" || failed=1; fi
+    sh "$SCRIPT_DIR/firewall.sh" down || failed=1
+    [ "$failed" = 0 ] || return 1
+    for unit in "$TIMER" "$WG" "$FW"; do systemctl disable "$unit" >/dev/null 2>&1 || failed=1; done
+    resource_files | while IFS= read -r path; do remove_owned_file "$path" || exit 1; done || failed=1
+    rm -f "$STATE/.installed"
+    if [ -f "$LIB/.owner" ] && [ "$(cat "$LIB/.owner")" = "$OWNER" ]; then rm -f "$LIB/.owner"; fi
+    rmdir "$DROPIN" "$PRIVATE" "$LIB" 2>/dev/null || :
+    systemctl daemon-reload || failed=1
+    [ "$failed" = 0 ] || return 1
+    touch "$STATE/.rolled-back"
+    printf 'Removed only project-owned resources. Private transaction backups remain in the project state directory.\n'
+}
+
+install_bundle() {
+    preflight
+    mkdir "$LOCK" 2>/dev/null || die 'Another project transaction is running'
+    trap 'result=$?; trap - 0 HUP INT TERM; if [ "$result" -ne 0 ]; then cleanup || :; [ ! -d "$STATE" ] || touch "$STATE/.failed"; fi; rmdir "$LOCK" 2>/dev/null || :; exit "$result"' 0
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    mkdir -p "$PRIVATE" "$LIB"
+    chmod 700 "$STATE" "$PRIVATE" "$LIB"
+    printf '%s\n' "$OWNER" > "$STATE/.owner"
+    printf '%s\n' "$OWNER" > "$LIB/.owner"
+    backup="$STATE/backup-$(date +%Y%m%d-%H%M%S)-$$"
+    mkdir "$backup"
+    iptables-save > "$backup/iptables.before"
+    ip -j -4 route show table all > "$backup/routes.before.json"
+    ip -j -4 addr show > "$backup/addresses.before.json"
+    for path in /etc/wireguard/wg0.conf /etc/ssh/sshd_config; do
+        if [ -f "$path" ]; then sha256sum "$path"; fi
+    done > "$backup/untouched-files.sha256"
+    systemctl is-active qq-stack-firewall.service > "$backup/qq-firewall.before"
+    install -m 600 "$SCRIPT_DIR/wg-warehouse.conf" "$PRIVATE/wg-warehouse.conf"
+    install -m 700 "$SCRIPT_DIR/firewall.sh" "$LIB/firewall.sh"
+    for unit in "$FW" "$TIMER" "$RECONCILE"; do install -m 644 "$SCRIPT_DIR/$unit" "/etc/systemd/system/$unit"; done
+    mkdir -p "$DROPIN"
+    install -m 644 "$SCRIPT_DIR/warehouse.conf" "$DROPIN/warehouse.conf"
+    systemctl daemon-reload
+    systemctl enable "$FW" "$WG" "$TIMER" >/dev/null
+    systemctl start "$FW"
+    systemctl start "$WG"
+    systemctl is-active --quiet "$FW" "$WG"
+    sh "$LIB/firewall.sh" check
+    [ "$(wg show "$IFACE" listen-port)" = 51830 ] || die 'Project WireGuard listener did not start'
+    if [ -s "$backup/untouched-files.sha256" ]; then
+        sha256sum -c --status "$backup/untouched-files.sha256" || die 'Existing protected files changed during installation'
+    fi
+    touch "$STATE/.installed"
+    systemctl start "$TIMER"
+    systemctl is-active --quiet "$FW" "$WG" "$TIMER"
+    rm -f "$STATE/.rolled-back" "$STATE/.failed"
+    printf 'Installed project WireGuard endpoint on UDP 51830. Cloud security-group reachability must be verified separately.\n'
+}
+
+case "$ACTION" in
+    check) preflight ;;
+    install) install_bundle ;;
+    rollback)
+        owned_state || die 'No matching installation ownership marker'
+        mkdir "$LOCK" 2>/dev/null || die 'Another project transaction is running'
+        trap 'result=$?; trap - 0; rmdir "$LOCK" 2>/dev/null || :; exit "$result"' 0
+        cleanup ;;
+    status)
+        owned_state || die 'No matching installation ownership marker'
+        systemctl is-active "$FW" "$WG" "$TIMER"
+        sh "$SCRIPT_DIR/firewall.sh" check
+        wg show "$IFACE" listen-port
+        wg show "$IFACE" latest-handshakes
+        ip -4 route show dev "$IFACE" ;;
+    *) die 'Expected check, install, status or rollback' ;;
+esac

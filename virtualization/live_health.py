@@ -1,31 +1,26 @@
 """Read-only fresh business observations, separate from historical acceptance."""
 from datetime import datetime, timezone
-import json
-import time
 
 try:
-    from .check_faults import FaultRunner, online, CLOUD_IP
-    from .check_matrix import encoded_python, extract_json
+    from .lab_session import LabSession
+    from .probes import online,encoded_python,extract_json,remote_sources,probe_parameters,probe_output
+    from .lab_topology import CLOUD_IP,SERVICE_IP,SERVICE_PORT
 except ImportError:
-    from check_faults import FaultRunner, online, CLOUD_IP
-    from check_matrix import encoded_python, extract_json
+    from lab_session import LabSession
+    from probes import online,encoded_python,extract_json,remote_sources,probe_parameters,probe_output
+    from lab_topology import CLOUD_IP,SERVICE_IP,SERVICE_PORT
 
 
 def observe(console_factory, cloud_factory=None):
     report={'observed_at':datetime.now(timezone.utc).isoformat(),'state':'unknown','components':{}}
-    runner=FaultRunner(console_factory,cloud_factory=cloud_factory)
+    runner=LabSession(console_factory,cloud_factory=cloud_factory)
     try:
         local=runner.local_probe()
         report['components']['local_business']={'state':'healthy' if online(local) else 'unhealthy','source':'office','evidence':local}
-        script="""import http.client,json,socket
-r={}
-try:
- c=http.client.HTTPConnection('192.168.30.10',8080,timeout=4)
- c.request('GET','/api/health');v=c.getresponse();r['status']=v.status;r['health']=json.loads(v.read(32768));c.close()
-except Exception as e:r['error_type']=type(e).__name__
-print('\\nWH_LIVE_HEALTH_'+json.dumps(r))
-"""
-        result=runner.matrix.console('office').command(encoded_python(script),timeout=15)
+        script=(remote_sources('application_health')+'\n'
+            +probe_parameters({'service_ip':SERVICE_IP,'service_port':SERVICE_PORT})
+            +'result=application_health(parameters)\n'+probe_output('WH_LIVE_HEALTH_'))
+        result=runner.console('office').command(encoded_python(script,role='office'),timeout=15)
         data=extract_json(result['output'],'WH_LIVE_HEALTH_')
         report['components']['application_health']={'state':data.get('health',{}).get('state','unknown'),'source':'office','evidence':data}
         if cloud_factory:

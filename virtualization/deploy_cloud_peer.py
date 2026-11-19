@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from cloud_connection import audit, connect_guangzhou
 from guangzhou_peer import generate_bundle, read_key
-from provision_guests import exec_collect
+from ssh_stream import exec_collect
 from runtime import PRIVATE, PROJECT
 
 

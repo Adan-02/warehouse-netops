@@ -98,7 +98,8 @@ def notification(source, event_id, transition, occurred_at, event, change_id=Non
     return delivery_id, json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
-class DeliveryStore:
+class NotificationState:
+    """Durable reachability events, site change cursor and notification outbox."""
     def __init__(self, path, clock=time.time):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -263,3 +264,7 @@ CREATE TABLE IF NOT EXISTS remote_events(
         for old in backups[:-keep]:
             if old.is_file() and not old.is_symlink(): old.unlink()
         return target
+
+
+# Import compatibility for existing callers; there is one implementation.
+DeliveryStore = NotificationState

@@ -10,30 +10,49 @@ import urllib.request
 import re
 import shutil
 from datetime import datetime, timezone
+from dataclasses import dataclass
 try:
     from .lab_profile import load_profile
+    from .lab_topology import MACS
 except ImportError:
     from lab_profile import load_profile
+    from lab_topology import MACS
 
 PROJECT = Path(__file__).resolve().parents[1]
-PROFILE = load_profile()
-RUNTIME = Path(PROFILE['runtime_dir'])
-IMAGES = RUNTIME / "images"
-VMS = RUNTIME / "vms"
 PRIVATE = PROJECT / ".secrets/virtual-lab"
-VMRUN = Path(PROFILE['vmrun'])
-TOOLS_IMAGE = PROFILE['tools_image']
-MACS = {
-    "router": ["00:50:56:21:10:01", "00:50:56:21:10:02", "00:50:56:21:10:03", "00:50:56:21:10:04"],
-    "service": ["00:50:56:21:20:01"],
-    "iot": ["00:50:56:21:20:02"],
-    "office": ["00:50:56:21:20:03"],
-}
+
+
+@dataclass(frozen=True)
+class RuntimePaths:
+    profile: dict
+    runtime: Path
+    images: Path
+    vms: Path
+    private: Path
+    vmrun: Path
+    tools_image: str
+
+
+def load_paths(profile=None):
+    """Resolve machine settings when an operation runs, never during import."""
+    profile = load_profile() if profile is None else profile
+    root = Path(profile['runtime_dir'])
+    return RuntimePaths(profile, root, root/'images', root/'vms', PRIVATE,
+                        Path(profile['vmrun']), profile['tools_image'])
+
+
+def __getattr__(name):
+    """Compatibility for external callers using the old runtime constants."""
+    fields = {'PROFILE':'profile', 'RUNTIME':'runtime', 'IMAGES':'images',
+              'VMS':'vms', 'VMRUN':'vmrun', 'TOOLS_IMAGE':'tools_image'}
+    if name not in fields:
+        raise AttributeError(name)
+    return getattr(load_paths(), fields[name])
 
 
 def lan_segments() -> dict[str, str]:
     """Read only the three named LAN segments created in VMware's editor."""
-    pref = Path(PROFILE['vmware_preferences'])
+    pref = Path(load_paths().profile['vmware_preferences'])
     text = pref.read_text(encoding="utf-8", errors="replace")
     values = dict(re.findall(r'^\s*(pref\.namedPVNs\d+\.(?:name|pvnID))\s*=\s*"([^"\n]+)"', text, re.M))
     found = {}
@@ -52,7 +71,8 @@ def lan_segments() -> dict[str, str]:
 
 
 def prepare_dirs() -> None:
-    for p in (IMAGES, VMS, PRIVATE):
+    paths = load_paths()
+    for p in (paths.images, paths.vms, paths.private):
         p.mkdir(parents=True, exist_ok=True)
 
 
@@ -83,18 +103,21 @@ def download(url: str, target: Path, expected: str, algorithm: str = "sha256") -
     print(f"Downloaded and verified {target.name}", flush=True)
 
 
-def tool(*args: str, mount: Path = RUNTIME) -> subprocess.CompletedProcess:
+def tool(*args: str, mount: Path | None = None) -> subprocess.CompletedProcess:
+    paths = load_paths()
+    mount = paths.runtime if mount is None else mount
     return subprocess.run(["docker", "run", "--rm", "--network", "none", "--mount",
-                           f"type=bind,source={mount},target=/work", TOOLS_IMAGE, *args],
+                           f"type=bind,source={mount},target=/work", paths.tools_image, *args],
                           check=True, text=True, encoding="utf-8", capture_output=True)
 
 
 def ensure_stopped(role: str) -> Path:
     if role not in MACS:
         raise ValueError('Unknown lab role')
-    directory = VMS / role
+    paths = load_paths()
+    directory = paths.vms / role
     target = directory / f'{role}.vmx'
-    result = subprocess.run([str(VMRUN), 'list'], check=True, text=True,
+    result = subprocess.run([str(paths.vmrun), 'list'], check=True, text=True,
                             encoding='utf-8', capture_output=True)
     if str(target).casefold() in {s.strip().casefold() for s in result.stdout.splitlines()[1:]}:
         raise RuntimeError(f'{role}: power off the lab VM before changing its configuration')
@@ -124,7 +147,7 @@ def vmx(role: str, disk: Path, *, stage: bool = True, seed: Path | None = None, 
     target = ensure_stopped(role)
     if target.exists() and not replace:
         raise FileExistsError(f'{role}: existing VMX protected; use the explicit offline network-switch function')
-    directory = VMS / role
+    directory = load_paths().vms / role
     directory.mkdir(parents=True, exist_ok=True)
     memory = {"router": 512, "service": 2048, "iot": 512, "office": 1536}[role]
     # Conservative profile for this WHP host; leave Hyper-V/WSL unchanged.
@@ -165,5 +188,6 @@ def vmx(role: str, disk: Path, *, stage: bool = True, seed: Path | None = None, 
 
 
 def vmrun(action: str, role: str, *arguments: str) -> subprocess.CompletedProcess:
-    return subprocess.run([str(VMRUN), "-T", "ws", action, str(VMS / role / f"{role}.vmx"), *arguments],
+    paths = load_paths()
+    return subprocess.run([str(paths.vmrun), "-T", "ws", action, str(paths.vms / role / f"{role}.vmx"), *arguments],
                           check=True, text=True, encoding="utf-8", capture_output=True)

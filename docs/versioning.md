@@ -20,6 +20,8 @@ python virtualization/release.py deploy --release-id v0.5.1-<构建输出的提�
 
 发布器复用广州至服务机的既有 WireGuard/SSH 路径，流式传输并校验制品。发布前备份数据库及配置，保存旧镜像；只更新看板容器，Broker 与数据卷沿用。运行版本通过 `/api/version`、实际 image ID、正常入库和采样增长核对，广州端再次读取版本确认所见一致。
 
+`status` 运行独立的只读远端程序，不上传管理器、不创建发布目录。安装和切换只在显式更新操作中执行；首次环境预装入口见[接手说明](HANDOFF.md)。
+
 ```sh
 python virtualization/release.py rollback
 python virtualization/release.py status

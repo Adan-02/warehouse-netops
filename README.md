@@ -97,6 +97,7 @@ MQTT 主题为 `warehouse/cabinet-01/telemetry`：
 
 ## 文档
 
+- [接手说明](docs/HANDOFF.md)
 - [项目设计](PROJECT.md)
 - [单电脑虚拟实验](docs/virtual-lab.md)
 - [演示手册](docs/demo-runbook.md)

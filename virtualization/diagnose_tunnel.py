@@ -1,10 +1,12 @@
 """Read-only diagnostics for the independently owned Guangzhou tunnel."""
 import json
 from cloud_connection import connect_guangzhou
-from provision_guests import exec_collect
+from ssh_stream import exec_collect
 
 
-if __name__ == '__main__':
+def main(argv=None):
+    import argparse
+    argparse.ArgumentParser(description=__doc__).parse_args(argv)
     client = connect_guangzhou()
     try:
         command = ('sudo -n /usr/sbin/iptables -nvx -L WH-WAREHOUSE-IN; '
@@ -17,3 +19,7 @@ if __name__ == '__main__':
         print(json.dumps({'exit_code':code,'output':output}))
     finally:
         client.close()
+
+
+if __name__ == '__main__':
+    main()

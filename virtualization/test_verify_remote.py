@@ -157,16 +157,29 @@ class MainCleanupTests(unittest.TestCase):
                 '\nWH_REMOTE_HTTP_'+json.dumps(http or good_http()),
                 '\nWH_REMOTE_PATH_'+json.dumps(path or good_path())]
 
-    def run_main(self,outputs=None):
+    def run_main(self,outputs=None,argv=None):
         with mock.patch.object(remote,'checked',side_effect=outputs or self.command_outputs()),redirect_stdout(io.StringIO()) as output:
-            code=remote.main()
+            code=remote.main(argv or [])
         return code,json.loads(output.getvalue())
 
     def test_verified_success_closes_both_transports(self):
         code,summary=self.run_main()
         self.assertEqual(code,0);self.assertTrue(summary['passed'])
         self.runner.close.assert_called_once();self.client.close.assert_called_once()
+        self.mocks['prepare_ssh'].assert_not_called()
+
+    def test_ssh_preparation_requires_explicit_opt_in(self):
+        code,summary=self.run_main(argv=['--prepare-ssh'])
+        self.assertEqual(code,0);self.assertTrue(summary['passed'])
         self.mocks['prepare_ssh'].assert_called_once()
+
+    def test_help_never_reads_profile_opens_network_or_prepares_identity(self):
+        with redirect_stdout(io.StringIO()),self.assertRaises(SystemExit) as error:
+            remote.main(['--help'])
+        self.assertEqual(error.exception.code,0)
+        self.mocks['connect_guangzhou'].assert_not_called()
+        self.mocks['MatrixRunner'].assert_not_called()
+        self.mocks['prepare_ssh'].assert_not_called()
 
     def test_old_substring_root_identity_cannot_pass(self):
         self.mocks['exec_collect'].return_value=(0,'root\nwarehouse-service\n')

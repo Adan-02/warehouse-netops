@@ -8,14 +8,14 @@ from unittest import mock
 import sys
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
-import prepare_disks as disks
+from virtualization.bootstrap import create_guest_disks as disks
 
 
 class DiskPreparationTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name)
-        self.patch=mock.patch.object(disks,'VMS',self.root/'vms');self.patch.start();self.addCleanup(self.patch.stop)
+        self.patch=mock.patch.object(disks,'load_paths',return_value=mock.Mock(vms=self.root/'vms',images=self.root));self.patch.start();self.addCleanup(self.patch.stop)
         self.stop=mock.patch.object(disks,'ensure_stopped',side_effect=lambda role:self.root/'vms'/role/(role+'.vmx'));self.stop.start();self.addCleanup(self.stop.stop)
 
     def test_config_seed_disk_and_partial_outputs_are_protected(self):
@@ -62,12 +62,12 @@ class DiskPreparationTests(unittest.TestCase):
 
     def test_all_role_preflight_happens_before_any_preparation(self):
         folder=self.root/'vms/office';folder.mkdir(parents=True);(folder/'office.vmx').write_text('existing')
-        with mock.patch.object(disks,'prepare') as prepare,mock.patch.object(disks,'verify_base') as verify,self.assertRaises(FileExistsError):disks.main([])
+        with mock.patch('virtualization.bootstrap.guards.require_staging'),mock.patch.object(disks,'prepare') as prepare,mock.patch.object(disks,'verify_base') as verify,self.assertRaises(FileExistsError):disks.main([])
         prepare.assert_not_called();verify.assert_not_called()
 
     def test_locked_source_checksum_is_required(self):
         image=self.root/'debian-13-generic-amd64.qcow2';image.write_bytes(b'wrong')
-        with mock.patch.object(disks,'IMAGES',self.root),mock.patch.object(disks,'load_lock',return_value=[{'filename':image.name,'algorithm':'sha256','checksum':'0'*64}]),self.assertRaises(RuntimeError):disks.verify_base()
+        with mock.patch.object(disks,'load_paths',return_value=mock.Mock(images=self.root)),mock.patch.object(disks,'load_lock',return_value=[{'filename':image.name,'algorithm':'sha256','checksum':'0'*64}]),self.assertRaises(RuntimeError):disks.verify_base()
 
 
 if __name__=='__main__':unittest.main()

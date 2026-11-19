@@ -4,8 +4,12 @@ from datetime import datetime,timezone
 import json
 from pathlib import Path
 import time
-from console import Console
-from check_matrix import MatrixRunner, encoded_python, extract_json, network_ready
+try:
+    from .lab_session import LabSession
+    from .probes import encoded_python,extract_json,network_ready
+except ImportError:
+    from lab_session import LabSession
+    from probes import encoded_python,extract_json,network_ready
 
 
 def script(mode,prefix):
@@ -45,7 +49,11 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--output',type=Path,default=Path(__file__).resolve().parents[1]/'evidence/virtual-mqtt-policy.json')
     args=parser.parse_args()
-    runner=MatrixRunner(Console)
+    try:
+        from .console import Console
+    except ImportError:
+        from console import Console
+    runner=LabSession(Console)
     report={'observed_at':datetime.now(timezone.utc).isoformat(),'scope':'MQTT negative authorization from IoT VM, no routing mutation','checks':[]}
     def add(name,passed,evidence):report['checks'].append({'name':name,'status':'pass' if passed else 'failed','evidence':evidence})
     try:

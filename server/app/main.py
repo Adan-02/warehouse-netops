@@ -11,7 +11,7 @@ from waitress import serve
 
 from .config import load
 from .observations import ObservationReader
-from .state import DEVICE_ID,TOPIC,SCHEMA_VERSION,TelemetryStore,iso_timestamp
+from .state import DEVICE_ID,TOPIC,SCHEMA_VERSION,TelemetryService,iso_timestamp
 
 LOG=logging.getLogger('warehouse')
 
@@ -97,7 +97,8 @@ def create_app(store,observation_reader=None):
 
     @app.get('/api/history')
     def history():
-        return jsonify(device_id=DEVICE_ID,readings=store.history(integer('limit',120,1,240)))
+        return jsonify(device_id=DEVICE_ID,readings=store.history(
+            integer('limit',120,1,240),request.args.get('start'),request.args.get('end')))
 
     @app.get('/api/history/range')
     def history_range():
@@ -130,7 +131,7 @@ def create_app(store,observation_reader=None):
     @app.get('/healthz')
     def healthz():
         # Liveness does not read storage; a failed volume must leave diagnosis up.
-        return jsonify(ok=True,broker_connected=store.broker_connected)
+        return jsonify(ok=True,broker_connected=store.mqtt_subscription_active)
 
     return app
 
@@ -141,19 +142,19 @@ def make_client(store):
 
     def on_connect(connection,userdata,flags,reason_code,properties):
         if reason_code.is_failure:
-            store.set_broker_connected(False)
+            store.set_mqtt_subscription_active(False)
             LOG.warning('MQTT connection rejected: %s',reason_code)
             return
         result,_=connection.subscribe(TOPIC,qos=1)
-        if result!=mqtt.MQTT_ERR_SUCCESS: store.set_broker_connected(False)
+        if result!=mqtt.MQTT_ERR_SUCCESS: store.set_mqtt_subscription_active(False)
 
     def on_subscribe(connection,userdata,mid,reason_codes,properties):
         accepted=bool(reason_codes) and all(not result.is_failure for result in reason_codes)
-        store.set_broker_connected(accepted)
+        store.set_mqtt_subscription_active(accepted)
         LOG.info('MQTT subscription active=%s',accepted)
 
     def on_disconnect(connection,userdata,flags,reason_code,properties):
-        store.set_broker_connected(False)
+        store.set_mqtt_subscription_active(False)
         LOG.warning('MQTT disconnected: %s',reason_code)
 
     def on_message(connection,userdata,message):
@@ -174,7 +175,7 @@ def main():
     logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
     demo_mode=os.environ.get('DEMO_MODE','false').lower() in ('true','1')
     config=load(os.environ.get('WAREHOUSE_CONFIG_FILE'),demo_mode)
-    store=TelemetryStore(os.environ.get('SQLITE_PATH','/data/warehouse.sqlite3'),
+    store=TelemetryService(os.environ.get('SQLITE_PATH','/data/warehouse.sqlite3'),
         int(os.environ.get('OFFLINE_AFTER_SECONDS','20')),config=config)
     client=make_client(store)
     client.connect_async(os.environ.get('MQTT_HOST','broker'),int(os.environ.get('MQTT_PORT','1883')),keepalive=15)

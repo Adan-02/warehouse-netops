@@ -10,7 +10,9 @@ from runtime import PROJECT
 TARGET='/opt/warehouse-netops/tools/publish_sensor.py'
 
 
-def main():
+def main(argv=None):
+    import argparse
+    argparse.ArgumentParser(description=__doc__).parse_args(argv)
     data=(PROJECT/'tools/publish_sensor.py').read_bytes()
     digest=hashlib.sha256(data).hexdigest()
     temporary='/home/warehouse/warehouse-publisher-'+digest[:12]+'.new'

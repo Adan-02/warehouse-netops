@@ -67,7 +67,7 @@ python 'D:\CodeHomework\warehouse-netops\virtualization\install_observers.py' st
 python 'D:\CodeHomework\warehouse-netops\virtualization\collect_status.py'
 ```
 
-`release status` 核对实际镜像和 API 版本；观测器 `status` 检查本项目两侧定时器；总记录将历史验收与当前健康分开。发布、应用回滚和数据库备份分别按[版本发布与回退](versioning.md)执行，不再用预装阶段的源码复制命令更新已隔离的服务机。
+`release status` 通过独立只读程序核对实际镜像和 API 版本，不安装发布管理器；观测器 `status` 同时检查两侧定时器、最近一轮执行时间及各阶段结果。总记录将历史验收与当前健康分开。发布、应用回滚和数据库备份分别按[版本发布与回退](versioning.md)执行。
 
 实验结束可有序关闭四台实验 VM：
 
@@ -108,7 +108,17 @@ python 'D:\CodeHomework\warehouse-netops\virtualization\check_wan.py' --output '
 
 ## 维护现有环境
 
-`prepare_router.py`、`prepare_guests.py` 用于首次建立实验，拒绝覆盖既有 VMX、seed 和磁盘；日常不要重跑或绕过保护。三台 Debian 切网前已建立 `warehouse-staging-ready-20261119` 快照；隔离操作只更新网卡字段，保留活动差分盘、UUID 和快照指针。恢复该快照会回到预装阶段，不能当作最终隔离网络状态。
+首次安装的实现集中在 `virtualization/bootstrap/`，入口为 `python -m virtualization.bootstrap.<名称>`：
+
+| 阶段 | 模块，按执行顺序 | 前置条件 |
+| --- | --- | --- |
+| 创建 | `create_router` → `create_guest_disks` → `create_guests` | VMware、三个命名 LAN Segment、锁定镜像及本机配置已就绪；不覆盖既有文件 |
+| 预装 | `install_router_packages` → `provision_staging_guests` → `stage_service_application` | 三台 Debian 仍在 VMnet8 临时网段；没有正式发布记录 |
+| 隔离 | `finalize_isolated_network` | 已完成预装；保留活动磁盘和快照，仅切换指定网卡字段 |
+
+各命令的 `--help` 在读取机器配置或执行操作前退出。旧 `prepare_*`、`bootstrap_router.py`、`provision_guests.py`、`deploy_service.py` 和 `switch_to_isolated.py` 仅保留兼容入口。预装命令检测到已有发布或隔离网卡时拒绝，日常更新使用 `release.py`。
+
+三台 Debian 切网前已建立 `warehouse-staging-ready-20261119` 快照；恢复该快照会回到预装阶段，不能当作最终隔离网络状态。
 
 官方镜像地址与校验值在运行目录 `images\official-checksums.json`。首次预装的 `.200.60/.61/.62` 临时连接已去掉。早期 NAT 故障由用户重启原 NAT 服务后恢复，配置未改，原本停止的 DHCP 服务未启动。预装时的临时 SSH 回环代理均不是最终拓扑，OpenWrt 原 feed 已恢复。
 

@@ -1,29 +1,9 @@
-"""Prepare NoCloud ISOs and VMware configs for the three Linux roles."""
-import pathlib
-import subprocess
+"""Compatibility entrance. Use python -m virtualization.bootstrap.create_guests."""
 import sys
-from runtime import MACS, PRIVATE, PROJECT, VMS, tool, vmx, ensure_stopped
+from pathlib import Path
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from virtualization.bootstrap.create_guests import main
 
-
-def main():
-    # All roles are checked before writing even one seed or ISO.
-    for role in ("service", "iot", "office"):
-        target = ensure_stopped(role)
-        if target.exists() or (target.parent / 'seed').exists() or (target.parent / 'seed.iso').exists():
-            raise FileExistsError(f'{role}: existing prepared VM protected; not overwriting seed/ISO/VMX')
-    for role in ("service", "iot", "office"):
-        d = VMS / role
-        if not (d / f"{role}.vmdk").exists():
-            raise FileNotFoundError(f"Prepare {role} disk first")
-        subprocess.run([sys.executable, str(PROJECT / "virtualization/debian/generate_seed.py"),
-                        "--role", role, "--output-dir", str(d / "seed"),
-                        "--ssh-public-key-file", str(PRIVATE / "lab_ed25519.pub"),
-                        "--instance-id", f"warehouse-{role}-v1", "--mac", MACS[role][0]], check=True)
-        prefix = f"/work/vms/{role}"
-        tool("genisoimage", "-output", prefix + "/seed.iso", "-volid", "cidata", "-joliet", "-rock",
-             prefix + "/seed/user-data", prefix + "/seed/meta-data", prefix + "/seed/network-config")
-        print(vmx(role, d / f"{role}.vmdk", seed=d / "seed.iso"), flush=True)
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

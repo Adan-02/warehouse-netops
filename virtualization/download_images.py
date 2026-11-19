@@ -6,9 +6,9 @@ from pathlib import Path
 import re
 from urllib.parse import urlparse
 try:
-    from .runtime import IMAGES, PROJECT, download, digest, prepare_dirs
+    from .runtime import PROJECT, download, digest, prepare_dirs, load_paths
 except ImportError:
-    from runtime import IMAGES, PROJECT, download, digest, prepare_dirs
+    from runtime import PROJECT, download, digest, prepare_dirs, load_paths
 
 OPENWRT = "25.12.6"
 OW_BASE = f"https://downloads.openwrt.org/releases/{OPENWRT}/targets/x86/64/"
@@ -48,12 +48,12 @@ def main(argv=None):
     args=parser.parse_args(argv)
     jobs=load_lock(args.lock_file)
     if args.verify_only:
-        results=[{'filename':row['filename'],'verified':(IMAGES/row['filename']).is_file() and digest(IMAGES/row['filename'],row['algorithm'])==row['checksum']} for row in jobs]
+        results=[{'filename':row['filename'],'verified':(load_paths().images/row['filename']).is_file() and digest(load_paths().images/row['filename'],row['algorithm'])==row['checksum']} for row in jobs]
         print(json.dumps(results,indent=2))
         return 0 if all(row['verified'] for row in results) else 1
     prepare_dirs()
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(download,row['url'],IMAGES/row['filename'],row['checksum'],row['algorithm']) for row in jobs]
+        futures = [pool.submit(download,row['url'],load_paths().images/row['filename'],row['checksum'],row['algorithm']) for row in jobs]
         for future in futures:
             future.result()
     return 0

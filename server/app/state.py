@@ -1,6 +1,5 @@
 """Transactional telemetry, process health and durable incident transitions."""
 import json
-from contextlib import closing
 import logging
 import math
 from pathlib import Path
@@ -8,19 +7,16 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import datetime,timezone
 import uuid
 
 from .config import defaults
+from .history import aggregate_history, iso_timestamp, open_export, open_reader, range_bounds, recent_readings
+from .migrations import SCHEMA_VERSION, migrate_database
+from .thresholds import evaluate_threshold, sampling_interrupted
 
 DEVICE_ID='cabinet-01'
 TOPIC='warehouse/cabinet-01/telemetry'
-SCHEMA_VERSION=3
 LOG=logging.getLogger('warehouse')
-
-
-def iso_timestamp(value):
-    return datetime.fromtimestamp(value,timezone.utc).isoformat() if value is not None else None
 
 
 def finite_number(value,field):
@@ -65,24 +61,7 @@ def parse_reading(payload):
     return value['seq'],value['temperature_c'],value['humidity_pct']
 
 
-def range_bounds(start,end):
-    values=[]
-    for item in (start,end):
-        if not isinstance(item,str) or len(item)>64:
-            raise ValueError('start and end must be timezone-aware ISO 8601 timestamps')
-        try:
-            parsed=datetime.fromisoformat(item.replace('Z','+00:00'))
-            if parsed.tzinfo is None: raise ValueError()
-            stamp=parsed.timestamp()
-        except (ValueError,OverflowError):
-            raise ValueError('start and end must be timezone-aware ISO 8601 timestamps') from None
-        values.append(stamp)
-    if not 0<values[1]-values[0]<=7*86400:
-        raise ValueError('time range must be positive and at most 7 days')
-    return values
-
-
-class TelemetryStore:
+class TelemetryService:
     def __init__(self,db_path,offline_after_seconds=20,clock=time.time,monotonic=time.monotonic,config=None):
         self.path=str(db_path)
         Path(db_path).parent.mkdir(parents=True,exist_ok=True)
@@ -93,7 +72,7 @@ class TelemetryStore:
         self.monotonic=monotonic
         self.config=config or defaults()
         self.offline_after_seconds=offline_after_seconds
-        self.broker_connected=False
+        self.mqtt_subscription_active=False
         self.storage_state='healthy'
         self.last_persist_error_at=None
         self.last_persist_error=None
@@ -103,6 +82,7 @@ class TelemetryStore:
         self._pending=[]
         self._pending_lost=0
         self._threshold_pending={}
+        self._threshold_sample_gap=False
         # First background tick also performs retention; frequent restarts must
         # not postpone cleanup indefinitely.
         self._last_cleanup=monotonic()-86400
@@ -117,31 +97,7 @@ class TelemetryStore:
         self._interrupt_old_events()
 
     def _migrate(self):
-        try:
-            self.db.execute('BEGIN IMMEDIATE')
-            self.db.execute('CREATE TABLE IF NOT EXISTS readings (id INTEGER PRIMARY KEY,seq INTEGER NOT NULL,temperature_c REAL NOT NULL,received_at REAL NOT NULL,humidity_pct REAL)')
-            columns={row[1] for row in self.db.execute('PRAGMA table_info(readings)')}
-            for name,kind in (('humidity_pct','REAL'),('device_id',"TEXT DEFAULT 'cabinet-01'"),('boot_id','TEXT')):
-                if name not in columns:
-                    self.db.execute('ALTER TABLE readings ADD COLUMN '+name+' '+kind)
-            self.db.execute('CREATE INDEX IF NOT EXISTS readings_received_at ON readings(received_at)')
-            self.db.execute('CREATE UNIQUE INDEX IF NOT EXISTS readings_identity ON readings(device_id,boot_id,seq) WHERE boot_id IS NOT NULL')
-            self.db.execute('CREATE TABLE IF NOT EXISTS device_sessions (device_id TEXT NOT NULL,boot_id TEXT NOT NULL,first_seen_at REAL NOT NULL,last_seen_at REAL NOT NULL,max_seq INTEGER NOT NULL,closed_at REAL,PRIMARY KEY(device_id,boot_id))')
-            self.db.execute('CREATE UNIQUE INDEX IF NOT EXISTS one_current_session ON device_sessions(device_id) WHERE closed_at IS NULL')
-            self.db.execute('CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,event_type TEXT NOT NULL,device_id TEXT NOT NULL,rule_id TEXT,started_at REAL NOT NULL,detected_at REAL NOT NULL,ended_at REAL,end_reason TEXT,evidence_json TEXT NOT NULL)')
-            self.db.execute('CREATE TABLE IF NOT EXISTS event_changes (change_id INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL,transition TEXT NOT NULL,occurred_at REAL NOT NULL,event_json TEXT NOT NULL)')
-            self.db.execute('CREATE INDEX IF NOT EXISTS events_ended_at ON events(ended_at)')
-            self.db.execute('CREATE TABLE IF NOT EXISTS schema_meta (name TEXT PRIMARY KEY,value TEXT NOT NULL)')
-            existing=self.db.execute("SELECT value FROM schema_meta WHERE name='schema_version'").fetchone()
-            if existing and int(existing[0])>SCHEMA_VERSION:
-                raise ValueError('Database schema is newer than this application')
-            self.db.execute("INSERT INTO schema_meta(name,value) VALUES ('schema_version',?) ON CONFLICT(name) DO UPDATE SET value=excluded.value",(str(SCHEMA_VERSION),))
-            self.db.execute("INSERT INTO schema_meta(name,value) VALUES ('minimum_reader_version','0.3.0') ON CONFLICT(name) DO NOTHING")
-            self.db.commit()
-        except Exception:
-            self.db.rollback()
-            self.db.close()
-            raise
+        migrate_database(self.db)
 
     def _interrupt_old_events(self):
         now=self.clock()
@@ -153,9 +109,22 @@ class TelemetryStore:
             self._queue(event,'interrupted',now)
         self._flush_events()
 
-    def set_broker_connected(self,connected):
+    @property
+    def broker_connected(self):
+        """Compatibility name: true only after the telemetry SUBACK is accepted."""
+        return self.mqtt_subscription_active
+
+    @broker_connected.setter
+    def broker_connected(self,connected):
+        self.set_mqtt_subscription_active(connected)
+
+    def set_mqtt_subscription_active(self,active):
         with self.lock:
-            self.broker_connected=bool(connected)
+            self.mqtt_subscription_active=bool(active)
+
+    def set_broker_connected(self,connected):
+        """Retained for old callers; a transport connection alone is insufficient."""
+        self.set_mqtt_subscription_active(connected)
 
     def ingest(self,payload,retained=False):
         try:
@@ -208,8 +177,8 @@ class TelemetryStore:
             # A new sample can arrive before the background evaluator runs
             # again (for example after a suspended VM resumes). Do not count
             # that unobserved gap as continuous threshold/recovery evidence.
-            if self._latest and now-self._latest['received_at']>=self.offline_after_seconds:
-                self._threshold_pending.clear()
+            previous_received_at=self._latest['received_at'] if self._latest else None
+            self._threshold_sample_gap |= sampling_interrupted(previous_received_at,now,self.offline_after_seconds)
             self._latest=dict(value,received_at=now)
             self.last_persist_success_at=now
             self.storage_state='healthy'
@@ -233,8 +202,8 @@ class TelemetryStore:
             now=self.clock()
             age=max(0,now-row['received_at']) if row else None
             data='awaiting_data' if not row else 'online' if age<self.offline_after_seconds else 'stale'
-            return {'device_id':DEVICE_ID,'status':data if self.broker_connected else 'broker_disconnected',
-                'data_status':data,'broker_connected':self.broker_connected,
+            return {'device_id':DEVICE_ID,'status':data if self.mqtt_subscription_active else 'broker_disconnected',
+                'data_status':data,'broker_connected':self.mqtt_subscription_active,
                 'seq':row['seq'] if row else None,'temperature_c':row['temperature_c'] if row else None,
                 'humidity_pct':row['humidity_pct'] if row else None,'boot_id':row['boot_id'] if row else None,
                 'dedup_available':bool(row and row['boot_id']),
@@ -254,7 +223,7 @@ class TelemetryStore:
             'state':'active' if event.get('ended_at') is None else 'interrupted' if event.get('end_reason')=='observation_interrupted' else 'resolved'}
         if result['state']=='active' and event['event_type']=='threshold_exceeded':
             current=self.status()
-            result['recovery_observation']='available' if (current['data_status']=='online' and self.broker_connected and self.storage_state=='healthy') else 'unknown'
+            result['recovery_observation']='available' if (current['data_status']=='online' and self.mqtt_subscription_active and self.storage_state=='healthy') else 'unknown'
         return result
 
     def live_events(self):
@@ -304,7 +273,7 @@ class TelemetryStore:
     def tick(self):
         with self.lock:
             status=self.status()
-            self._condition('broker_subscription_unavailable',not self.broker_connected,{'broker_connected':self.broker_connected})
+            self._condition('broker_subscription_unavailable',not self.mqtt_subscription_active,{'broker_connected':self.mqtt_subscription_active})
             self._condition('telemetry_stale',status['data_status']=='stale',
                 {'last_seen_at':status['last_seen_at'],'offline_after_seconds':self.offline_after_seconds},
                 started_at=self._latest['received_at']+self.offline_after_seconds if self._latest else None)
@@ -316,35 +285,33 @@ class TelemetryStore:
 
     def _evaluate_thresholds(self,status):
         alerts=self.config['alerts']
-        ready=alerts['enabled'] and self.broker_connected and status['data_status']=='online' and self.storage_state=='healthy'
-        now=self.monotonic()
+        sample_fresh=(alerts['enabled'] and self.mqtt_subscription_active
+                      and status['data_status']=='online' and self.storage_state=='healthy')
+        now_monotonic=self.monotonic()
+        now_utc=self.clock()
         for field in ('temperature_c','humidity_pct'):
             for direction in ('low','high'):
                 rule=field+'_'+direction
                 key=('threshold_exceeded',rule)
-                value=status.get(field)
-                if not ready or value is None:
-                    self._threshold_pending.pop(rule,None)
-                    continue
                 limits=alerts[field]
-                violated=value<limits['min'] if direction=='low' else value>limits['max']
-                recovered=value>=limits['min']+limits['hysteresis'] if direction=='low' else value<=limits['max']-limits['hysteresis']
                 active=key in self._active
-                qualifies=recovered if active else violated
-                if not qualifies:
+                decision=evaluate_threshold(
+                    value=status.get(field),direction=direction,limits=limits,active=active,
+                    pending=self._threshold_pending.get(rule),sample_fresh=sample_fresh,
+                    now_monotonic=now_monotonic,now_utc=now_utc,
+                    trigger_seconds=alerts['trigger_seconds'],recovery_seconds=alerts['recovery_seconds'],
+                    sample_gap=self._threshold_sample_gap)
+                if decision.pending is None:
                     self._threshold_pending.pop(rule,None)
-                    continue
-                pending=self._threshold_pending.get(rule)
-                if pending is None or pending[1]!=active:
-                    pending=(now,active,self.clock())
-                    self._threshold_pending[rule]=pending
-                duration=alerts['recovery_seconds'] if active else alerts['trigger_seconds']
-                if now-pending[0]>=duration:
-                    self._condition('threshold_exceeded',not active,
-                        {'field':field,'direction':direction,'value':value,'limits':dict(limits),
+                else:
+                    self._threshold_pending[rule]=decision.pending
+                if decision.action in ('raise','recover'):
+                    duration=alerts['trigger_seconds'] if decision.action=='raise' else alerts['recovery_seconds']
+                    self._condition('threshold_exceeded',decision.action=='raise',
+                        {'field':field,'direction':direction,'value':status[field],'limits':dict(limits),
                          'profile':self.config['profile'],'continuous_seconds':duration},rule=rule,
-                         started_at=pending[2] if not active else None)
-                    self._threshold_pending.pop(rule,None)
+                        started_at=decision.started_at)
+        self._threshold_sample_gap=False
 
     def events(self,after_id=None,limit=50):
         with self.lock:
@@ -368,55 +335,21 @@ class TelemetryStore:
                             'occurred_at':iso_timestamp(row[3]),'event':json.loads(row[4])} for row in rows],
                 'next_after_id':rows[-1][0] if rows else after_id,'latest_change_id':latest}
 
-    def history(self,limit=120):
+    def history(self,limit=120,start=None,end=None):
         with self.lock:
-            rows=self.db.execute('SELECT seq,temperature_c,humidity_pct,received_at FROM readings ORDER BY id DESC LIMIT ?',(limit,)).fetchall()
-        return [{'seq':seq,'temperature_c':temperature,'humidity_pct':humidity,'received_at':iso_timestamp(received)}
-                for seq,temperature,humidity,received in reversed(rows)]
+            return recent_readings(self.db,limit,start,end)
 
     def schema_info(self):
         return {'schema_version':SCHEMA_VERSION,'minimum_reader_version':'0.3.0'}
 
     def _reader(self):
-        # Separate read-only connections keep exports outside the ingestion lock.
-        target=Path(self.path).resolve().as_uri()+'?mode=ro'
-        connection=sqlite3.connect(target,uri=True,timeout=2)
-        connection.execute('PRAGMA query_only=ON')
-        return connection
+        return open_reader(self.path)
 
     def history_range(self,start,end,resolution='auto'):
-        start_epoch,end_epoch=range_bounds(start,end)
-        if resolution not in ('auto','60','300'):
-            raise ValueError('resolution must be auto, 60 or 300')
-        step=(60 if end_epoch-start_epoch<=86400 else 300) if resolution=='auto' else int(resolution)
-        first=math.floor(start_epoch/step)*step
-        size=math.ceil((end_epoch-first)/step)
-        if size>2048: raise ValueError('range exceeds 2048 buckets at this resolution')
-        with closing(self._reader()) as connection:
-            rows=connection.execute('SELECT CAST((received_at-?)/? AS INTEGER) AS bucket,COUNT(*),MIN(temperature_c),MAX(temperature_c),AVG(temperature_c),COUNT(temperature_c),MIN(humidity_pct),MAX(humidity_pct),AVG(humidity_pct),COUNT(humidity_pct) FROM readings WHERE received_at>=? AND received_at<? GROUP BY bucket',(first,step,start_epoch,end_epoch)).fetchall()
-        mapping={row[0]:row for row in rows}
-        buckets=[]
-        for index in range(size):
-            row=mapping.get(index)
-            buckets.append({'started_at':iso_timestamp(first+index*step),'ended_at':iso_timestamp(first+(index+1)*step),
-                'count':row[1] if row else 0,
-                'temperature_c':{'min':row[2],'max':row[3],'avg':row[4],'count':row[5]} if row and row[5] else None,
-                'humidity_pct':{'min':row[6],'max':row[7],'avg':row[8],'count':row[9]} if row and row[9] else None})
-        return {'device_id':DEVICE_ID,'start':iso_timestamp(start_epoch),'end':iso_timestamp(end_epoch),
-                'resolution_seconds':step,'buckets':buckets}
+        return aggregate_history(self.path,DEVICE_ID,start,end,resolution)
 
     def open_export(self,start,end):
-        first,last=range_bounds(start,end)
-        connection=self._reader()
-        try:
-            connection.execute('BEGIN')
-            count=connection.execute('SELECT COUNT(*) FROM readings WHERE received_at>=? AND received_at<?',(first,last)).fetchone()[0]
-            if count>130000: raise ValueError('CSV export exceeds 130000 rows')
-            cursor=connection.execute('SELECT device_id,boot_id,seq,temperature_c,humidity_pct,received_at FROM readings WHERE received_at>=? AND received_at<? ORDER BY received_at,id',(first,last))
-            return connection,cursor
-        except Exception:
-            connection.close()
-            raise
+        return open_export(self.path,start,end)
 
     def _cleanup(self):
         """Bounded daily batches; no vacuum and no deletion of active incidents."""
@@ -457,3 +390,7 @@ class TelemetryStore:
             if not self._closed:
                 self.db.close()
                 self._closed=True
+
+
+# Existing integrations may still import the original storage-oriented name.
+TelemetryStore = TelemetryService

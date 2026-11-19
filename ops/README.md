@@ -21,11 +21,37 @@ python virtualization/install_observers.py status
 
 `prepare` 只生成本地私密代码包。`install` 使用已有的广州管理连接、服务机维护连接与本地路由器 COM1，安装独立账号、SSH 限制、脚本及定时器。它会核对广州受保护基线，并通过 COM1 固定路由器主机身份，不添加网络端口或修改防火墙规则。
 
+`status` 只读取定时器和最近一轮诊断，分别输出 `timer` 与 `observation`。定时器 `active` 表示任务仍被调度；观测是否健康还要看周期时间和阶段结果。超过 35 秒没有新周期时显示 `unknown`，旧版本缺少阶段诊断时显示 `legacy_diagnostics_missing`。
+
 现场快照位于 `/var/lib/warehouse-netops-observer/observations/local.json` 与 `remote.json`，看板只读挂载该目录。观测私钥留在相应观测主机，不进入容器。路由器 SSH 身份只能调用固定诊断命令；回送身份只能向固定接收器提交有界 JSON。
 
 服务镜像的 SSH `AllowUsers` 保持原来的 `warehouse`。广州回送使用一把独立的 reporter key，限定来源为运维隧道地址、禁用转发和 PTY，并强制执行固定接收包装器。包装器核对协议与来源后立即降权到 `warehouse-observer`，由无 sudo／Docker 权限的进程写入快照；它不提供维护账号的交互能力。
 
+| 通信 | 登录身份和密钥 | 固定命令与执行身份 |
+| --- | --- | --- |
+| 服务机 `192.168.30.10` → 路由器 `192.168.30.1` | `root`，`router_ed25519`，固定路由器主机身份 | `warehouse-observe-v1`，只读取指定网络状态 |
+| 广州 `10.89.0.1` → 服务机 `192.168.30.10` | `warehouse`，`reporter_ed25519`，固定服务机主机身份 | `warehouse-report-v1`，包装器立即降权到 `warehouse-observer` 后接收 JSON |
+
+源地址、目标、协议、密钥和主机身份在两个明确的 SSH 函数中固定，通知外发不复用维护身份。
+
 项目定时器分别为 `warehouse-observer-site.timer`、`warehouse-observer-cloud.timer`。停止观测可以停用对应定时器，不影响应用服务或已有 WireGuard 接口。
+
+## 目录与周期
+
+代码中统一使用 `site` 和 `guangzhou` 表示位置。`cloud` 作为已有 CLI 角色、配置模板名及 systemd 文件名继续保留；快照中的身份一直是 `guangzhou`。
+
+目录默认值集中在 `ops/paths.py`：
+
+| 配置项 | 默认位置与内容 |
+| --- | --- |
+| `private_dir` | `/var/lib/warehouse-netops-observer/private`；密钥、主机身份、配置、通知数据库和备份 |
+| `observations_dir` | `/var/lib/warehouse-netops-observer/observations`；看板只读快照 |
+
+旧 `state_dir` 仍表示同一个私密目录，不会自动附加子目录或移动文件；同时提供新旧字段时必须指向同一位置。已安装环境的 outbox 和密钥路径保持原值。
+
+广州一轮任务按探测、记录不可达事件、回送快照、同步事件变化、派发通知、维护备份依次执行。`NotificationState` 负责持久游标、队列与远程故障状态，旧 `DeliveryStore` 导入名保持兼容。
+
+广州诊断写在私密目录的 `status.json`，现场诊断写在观测目录的 `site-status.json`。阶段名为 `probe`、`reachability`、`report`、`event_sync`、`dispatch`、`maintenance`，每项保留状态、固定原因码和最后成功时间。回送失败不阻止事件同步和已有通知重试，通知失败也不阻止备份；未启用 Webhook 明确显示 `disabled`。诊断不保存原始 SSH 错误、URL 或凭据。
 
 ## Webhook
 

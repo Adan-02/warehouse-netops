@@ -2,15 +2,23 @@
 import json
 from pathlib import Path
 import paramiko
-from runtime import PRIVATE
+try:
+    from .runtime import PRIVATE
+    from .lab_profile import load_profile
+    from .lab_topology import MANAGEMENT_IP, MANAGEMENT_USER
+except ImportError:
+    from runtime import PRIVATE
+    from lab_profile import load_profile
+    from lab_topology import MANAGEMENT_IP, MANAGEMENT_USER
 
 
-def connect_guangzhou():
+def connect_guangzhou(profile=None):
+    profile = load_profile() if profile is None else profile
     config = paramiko.SSHConfig()
     with (Path.home()/'.ssh/config').open(encoding='utf-8') as f:
         config.parse(f)
-    target = config.lookup('tencent-qq-ops')
-    if target.get('hostname') != '10.77.0.1' or target.get('user') != 'qqops':
+    target = config.lookup(profile['cloud_ssh_alias'])
+    if target.get('hostname') != MANAGEMENT_IP or target.get('user') != MANAGEMENT_USER:
         raise RuntimeError('Guangzhou management alias changed; do not guess another endpoint')
     known = target.get('userknownhostsfile')
     if not known or not Path(known).is_file():
@@ -51,10 +59,18 @@ PY"""
     return json.loads(data)
 
 
-if __name__ == '__main__':
+def main(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--capture-baseline', action='store_true',
+                        help='First-install only: save the protected service baseline without replacing it')
+    args = parser.parse_args(argv)
     client = connect_guangzhou()
     try:
         baseline = audit(client)
+        if not args.capture_baseline:
+            print(json.dumps(baseline, indent=2))
+            return 0
         target = PRIVATE/'guangzhou-before.json'
         if target.exists():
             raise FileExistsError('Existing cloud baseline protected')
@@ -62,3 +78,7 @@ if __name__ == '__main__':
         print('Guangzhou legacy service/config baseline saved privately; no changes made')
     finally:
         client.close()
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

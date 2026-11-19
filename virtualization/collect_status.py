@@ -4,7 +4,7 @@ import json
 import subprocess
 import hashlib
 from cloud_connection import audit, connect_guangzhou
-from runtime import PROJECT, PRIVATE, VMS, VMRUN
+from runtime import PROJECT, PRIVATE, load_paths
 from live_health import observe
 from console import Console
 
@@ -23,7 +23,9 @@ def combined_state(acceptance, live, protected=True):
     return 'healthy' if acceptance.get('state')=='passed' else 'incomplete'
 
 
-def main():
+def main(argv=None):
+    import argparse
+    argparse.ArgumentParser(description=__doc__).parse_args(argv)
     reports = {}
     for name in ('virtual-matrix','virtual-paths','virtual-remote','virtual-wan-disconnect','virtual-broker-stop','virtual-wan-policy'):
         path = PROJECT/'evidence'/(name+'.json')
@@ -33,8 +35,8 @@ def main():
             'observed_at':value.get('observed_at'),
             'restoration':value.get('restoration'),'report_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
             'version':value.get('version',value.get('git_commit','unrecorded_legacy_version'))}
-    active = subprocess.run([str(VMRUN),'list'],capture_output=True,text=True,check=True).stdout.splitlines()[1:]
-    vms = {role:str(VMS/role/(role+'.vmx')).casefold() in {s.strip().casefold() for s in active}
+    active = subprocess.run([str(load_paths().vmrun),'list'],capture_output=True,text=True,check=True).stdout.splitlines()[1:]
+    vms = {role:str(load_paths().vms/role/(role+'.vmx')).casefold() in {s.strip().casefold() for s in active}
            for role in ('router','service','iot','office')}
     host_containers = {}
     for role in ('broker','dashboard'):

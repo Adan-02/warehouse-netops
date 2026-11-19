@@ -45,6 +45,10 @@ class ProfileTests(unittest.TestCase):
 
 
 class LockTests(unittest.TestCase):
+    def setUp(self):
+        self.paths=mock.patch.object(downloads,'load_paths',return_value=mock.Mock(images=Path('unused-images')))
+        self.paths.start();self.addCleanup(self.paths.stop)
+
     def fixture(self):
         return {'schema_version':1,'images':[{'url':'https://cloud.debian.org/images/test.qcow2','filename':'test.qcow2','algorithm':'sha256','checksum':'a'*64}]}
 
@@ -64,7 +68,7 @@ class LockTests(unittest.TestCase):
         data=self.fixture()['images']
         with mock.patch.object(downloads,'load_lock',return_value=data),mock.patch.object(downloads,'prepare_dirs'),mock.patch.object(downloads,'download') as download,mock.patch.object(Path,'write_text') as write:
             self.assertEqual(downloads.main([]),0)
-            download.assert_called_once_with(data[0]['url'],downloads.IMAGES/'test.qcow2','a'*64,'sha256')
+            download.assert_called_once_with(data[0]['url'],Path('unused-images')/'test.qcow2','a'*64,'sha256')
             write.assert_not_called()
 
     def test_verify_only_cannot_download_or_create_directories(self):

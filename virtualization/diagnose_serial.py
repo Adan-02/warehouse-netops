@@ -3,7 +3,9 @@ import time
 from console import Console
 
 
-if __name__ == '__main__':
+def main(argv=None):
+    import argparse
+    argparse.ArgumentParser(description=__doc__).parse_args(argv)
     console = Console('router')
     try:
         console.send('\x03\r')
@@ -20,3 +22,7 @@ if __name__ == '__main__':
                 print(repr(console.read()[-200:]),flush=True)
     finally:
         console.close()
+
+
+if __name__ == '__main__':
+    main()
