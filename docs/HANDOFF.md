@@ -86,6 +86,7 @@ Git 回退改变源码；应用回滚切换 `current/previous` 对应镜像；�
 
 ## 按任务继续阅读
 
+- [独立接管练习](learning/README.md)：从消息地图、故障判断到自主变更和 Wokwi 联调，按实际掌握情况推进。
 - [项目设计与数据契约](../PROJECT.md) · [当前进度](../PROGRESS.md)
 - [虚拟实验与访问矩阵](virtual-lab.md) · [演示手册](demo-runbook.md)
 - [服务接口与单元测试](../server/README.md) · [观测身份与 Webhook](../ops/README.md)
